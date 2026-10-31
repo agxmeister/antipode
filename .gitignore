@@ -1,0 +1,9 @@
+# BMad personal overrides (never committed)
+_bmad/custom/*.user.toml
+
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
