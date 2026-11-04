@@ -1,6 +1,6 @@
 ---
 title: Antipode — PRD
-status: draft
+status: final
 created: 2026-11-01
 updated: 2026-11-04
 ---
@@ -10,7 +10,7 @@ updated: 2026-11-04
 
 ## 0. Document Purpose
 
-This PRD defines the MVP of Antipode. Antipode is an autonomous, downstream software factory that one owner runs from a phone. The PRD is written for that owner (agxmeister) and for the downstream BMad workflows: `bmad-ux`, `bmad-architecture` and `bmad-create-epics-and-stories`.
+This PRD defines the MVP of Antipode. Antipode is an autonomous, downstream software factory that one Owner runs from a phone. The PRD is written for that Owner (agxmeister) and for the downstream BMad workflows: `bmad-ux`, `bmad-architecture` and `bmad-create-epics-and-stories`.
 
 It builds on the forged idea at `docs/forge/antipode-autonomous-dev-factory/forged-idea.md` and that session's log. Where this PRD replaces a forge lock, it says so.
 
@@ -23,13 +23,13 @@ How to read it:
 
 ## 1. Vision
 
-Antipode lets one busy person run software projects the way a manager runs a team. The owner decides what should exist and whether the result is good enough. Agents do the routine work in between: they write code, build, test and produce proof. The owner never opens a laptop to check a branch. Each task arrives on the phone as a short visual report with screenshots, a screencast or a build to try. The owner taps **Accept**, or replies with a one-sentence correction.
+Antipode lets one busy person run software projects the way a manager runs a team. The Owner decides what should exist and whether the result is good enough. Agents do the routine work in between: they write code, build, test and produce proof. The Owner never opens a laptop to check a branch. Each Task arrives on the phone as a short visual report with screenshots, a screencast or a build to try. The Owner taps **Accept**, or replies with a one-sentence correction.
 
 The product is the **acceptance surface**, not the agents. Agents, containers, branches and CI are plumbing. Antipode adds a chain that, per `research-landscape.md`, no current tool closes end to end:
 
-contract with acceptance criteria → evidence produced for each criterion → one-tap judgement on a phone → integration and release.
+contract with acceptance criteria → evidence produced for each criterion → one-tap judgment on a phone → integration and release.
 
-Comparable tools such as Cursor cloud agents, the Copilot coding agent, Devin and Codex end in a pull request, so the human still judges the diff. Antipode ends in a judgement of the running result.
+Comparable tools such as Cursor cloud agents, the Copilot coding agent, Devin and Codex end in a pull request, so the human still judges the diff. Antipode ends in a judgment of the running result.
 
 Antipode is built for very different projects. The first three are an Android training tracker, a Unity game and OpenSCAD models for 3D printing. Each project declares how it is built, run, released and evidenced in a **Recipe**. Antipode itself is not tied to any project type.
 
@@ -37,10 +37,10 @@ Antipode is built for very different projects. The first three are an Android tr
 
 ### 2.1 Jobs To Be Done
 - **Functional:** move a personal project forward without spending laptop time on routine work. Delegate implementation and keep the decisions.
-- **Responsibility:** stay accountable for what ships. Nothing reaches a Release unless the owner has seen and accepted it. The owner accepts knowing what was deferred.
+- **Responsibility:** stay accountable for what ships. Nothing reaches a Release unless the Owner has seen and accepted it. The Owner accepts knowing what was deferred.
 - **Steering:** keep the work on track by reacting quickly to intermediate results, instead of writing exhaustive instructions upfront.
 - **Emotional:** feel like a manager guiding a capable team toward outcomes, not like someone babysitting a chatbot.
-- **Contextual:** review in short gaps, such as a commute or a queue, one-handed on a phone. Aim for about a minute per task and never more than two.
+- **Contextual:** review in short gaps, such as a commute or a queue, one-handed on a phone. Aim for about a minute per Task and never more than two.
 
 ### 2.2 Non-Users (v1)
 - Teams with several reviewers. The MVP has exactly one Owner per Project.
@@ -49,13 +49,13 @@ Antipode is built for very different projects. The first three are an Android tr
 
 ### 2.3 Key User Journeys
 
-- **UJ-1. agxmeister kicks off a task from the tram.**
+- **UJ-1. agxmeister kicks off a Task from the tram.**
   On the tram, agxmeister remembers the training app has no rest timer between sets. They send a voice note to the Antipode Telegram chat: "add a rest timer after each set, 90 seconds default."
   Within a few minutes Intake replies with a draft Task Contract. It has three Acceptance Criteria, each with its Required Evidence. For example: "screencast: finish set → timer starts → counts down → vibrates at zero." Intake asks one question: "Can the default be changed per exercise?"
   agxmeister answers "not yet" and taps **Approve**. The Task is queued.
   **Edge case:** if the Project's Recipe can't evidence a criterion (for example haptics in an emulator), Intake says so and proposes a substitute before it offers Approve.
 
-- **UJ-2. agxmeister accepts a finished task in under a minute.**
+- **UJ-2. agxmeister accepts a finished Task in under a minute.**
   A Review arrives:
   - one-line summary;
   - each Acceptance Criterion with a ✅ and its Evidence inline: a 20-second emulator screencast and two before/after screenshots;
@@ -70,16 +70,16 @@ Antipode is built for very different projects. The first three are an Android tr
   Intake turns the note into a structured Correction. The same Task goes back to the Implementer on the same Branch, and the Validator reruns.
   The next Review opens with what changed compared with the last Review, shown as a before/after pair. agxmeister accepts.
 
-- **UJ-4. agxmeister handles a stuck task.**
-  A Unity task uses up its Iteration Budget because the Validator keeps rejecting a physics behaviour. agxmeister receives a **Stuck** message. It shows what was attempted, the last Evidence, and Triage's one-line reason: "criterion 2 contradicts existing jump height."
+- **UJ-4. agxmeister handles a Stuck Task.**
+  A Unity task uses up its Iteration Budget because the Validator keeps rejecting a physics behavior. agxmeister receives a **Stuck** message. It shows what was attempted, the last Evidence, and Triage's one-line reason: "criterion 2 contradicts existing jump height."
   agxmeister replies "drop criterion 2, make a new task for it." Intake turns the reply into a contract amendment plus a new draft Task Contract and asks agxmeister to confirm. The Task then resumes.
 
 - **UJ-5. agxmeister peeks at progress.**
-  While waiting in a queue, agxmeister sends `/peek` on a running OpenSCAD task. They get the latest render and one line: "Implementer: adding fillet to the hinge, lap 2 of 5." Nothing is interrupted.
+  While waiting in a queue, agxmeister sends `/peek` on a running OpenSCAD Task. They get the latest render and one line: "Implementer: adding fillet to the hinge, lap 2 of 5." Nothing is interrupted.
 
 ## 3. Glossary
 
-- **Owner** — the single person who approves Task Contracts, reviews, accepts or corrects. Exactly one per Project.
+- **Owner** — the single person who approves Task Contracts and accepts or corrects each Review. Exactly one per Project.
 - **Project** — one repository managed by Antipode, with one Recipe and one Owner.
 - **Recipe** — a file in the Project repo, written by the Owner. It declares how to build, run, test, produce Evidence, provide a Demo and Release; the Runner for each step; Preview Data; and the *names* of the secrets each step needs. Secret values never live in the repo. Antipode consumes the Recipe and never invents it.
 - **Runner** — where a Recipe step executes:
@@ -91,19 +91,19 @@ Antipode is built for very different projects. The first three are an Android tr
 - **Acceptance Criterion** — one testable statement the result must satisfy.
 - **Required Evidence** — the kind of proof expected for an Acceptance Criterion: screencast, screenshots, render, test result, measurement or Demo.
 - **Evidence** — the artifacts actually produced for a Task, each linked to an Acceptance Criterion.
-- **Degraded Evidence** — Evidence that is only non-visual test output for a criterion that has a visible result. It is allowed, but it is always labelled as degraded in the Review.
+- **Degraded Evidence** — Evidence that is only non-visual test output for a criterion that has a visible result. It is allowed, but it is always labeled as degraded in the Review.
 - **Demo** — Evidence the Owner can try from the phone: an installable APK, a WebGL build, a preview URL or a downloadable STL. A Demo is provided when the Recipe and the Task allow it. It is not mandatory.
 - **Review** — the message sent to the Owner when a Task is reviewable. It contains a summary, the Evidence for each criterion, the Demo if there is one, the Parking Lot and the cost.
 - **Review Queue** — the Reviews delivered to the Owner and not yet answered.
 - **Correction** — the Owner's feedback on a Review. It returns the same Task to the Implementer on the same Branch.
-- **Owner Message** — any free-text or voice input from the Owner: a new task request, a Correction, a reply to a Stuck message or a contract edit.
+- **Owner Message** — any free-text or voice input from the Owner: a new Task request, a Correction, a reply to a Stuck message or a contract edit.
 - **Progress Peek** — an on-demand, read-only snapshot of a running Task: the latest visual Evidence plus one status line.
 - **Role** — a kind of agent work. Each run of a Role is a fresh, ephemeral agent session. The MVP Roles are:
   - **Intake**: drafts contracts and interprets every Owner Message.
-  - **Implementer**
-  - **Validator**
-  - **Evidence Producer**
-  - **Triage**
+  - **Implementer**: changes the code on the Task's Branch.
+  - **Validator**: independently checks the Branch against every Acceptance Criterion, and checks that the Evidence shows each criterion.
+  - **Evidence Producer**: creates the Evidence for each Acceptance Criterion.
+  - **Triage**: decides at branch points whether to re-run the Implementer or park findings, and writes the reason when a Task goes Stuck.
 
   More Roles can be added through Role Config.
 - **Role Config** — the instructions, skills and MCPs for a Role. Set globally, overridable per Project.
@@ -145,7 +145,7 @@ The Recipe declares which Evidence kinds the Project can produce. Examples:
 - Unity: play-mode recording, screenshots, WebGL build.
 - OpenSCAD: multi-angle renders, printability check, STL.
 
-Intake proposes only Required Evidence the Recipe can produce (see FR-7).
+Intake proposes only Required Evidence the Recipe can produce (see FR-8).
 
 #### FR-5: Preview Data and secrets
 Every Branch run and Demo uses its own Preview Data, seeded from the fixtures the Recipe declares. Stages get only the non-production secrets the Recipe names.
@@ -179,11 +179,7 @@ The Owner can approve a draft, reply with changes (Intake revises the draft), or
 - Dependencies on other Tasks are recorded and enforced (FR-15).
 
 #### FR-10: Interpret Owner Messages
-Intake turns every Owner Message about an existing Task into a structured instruction before the Coordinator acts on it:
-- a Correction note;
-- a contract amendment, such as dropping, adding or editing a criterion, or raising the budget;
-- a new draft Task Contract;
-- or a cancellation.
+Before the Coordinator acts on any Owner Message about an existing Task, Intake turns it into one structured instruction: a Correction note; a contract amendment (dropping, adding or editing a criterion, or raising the budget); a new draft Task Contract; or a cancellation.
 - If the meaning is ambiguous, Intake asks exactly one clarifying question.
 - Any change to Acceptance Criteria needs the Owner's confirmation before it takes effect.
 
@@ -229,11 +225,11 @@ A Task starts only when all its dependencies are merged to main. No more than a 
 - No Task ever starts on another Task's unmerged Branch.
 
 #### FR-16: Review Queue backpressure
-While the Review Queue holds the configured limit of unanswered Reviews or more (default 3), the Coordinator starts no new Tasks. Tasks already running continue.
+While the Review Queue holds at least the configured number of unanswered Reviews (default 3), the Coordinator starts no new Tasks. Tasks already running continue.
 - When the Owner answers a Review, the Coordinator resumes starting Tasks.
 
 #### FR-17: Usage Window budgeting
-The Coordinator tracks how much of the subscription's Usage Window has been consumed. Before a limit is reached, it pauses new Stages, and resumes them when the window allows.
+The Coordinator tracks how much of the subscription's Usage Window has been consumed. It pauses new Stages before a limit is reached and resumes them when the window allows.
 - The Owner sees a paused Task as "waiting for usage window" with an estimated resume time, not as failed.
 - `[ASSUMPTION: usage and the window position can be read or estimated from what Claude Code exposes; the result is approximate.]`
 
@@ -258,15 +254,16 @@ Each Task works on its own Branch, and no two agents edit the same working tree 
 #### FR-21: Evidence per Acceptance Criterion
 The Evidence Producer creates Evidence for each Acceptance Criterion and links every artifact to its criterion.
 - If any criterion lacks Evidence, the Task does not reach the Owner. It goes back to the Implementer (FR-13).
-- Before the Review is sent, the Validator checks that each piece of Evidence actually shows the behaviour its criterion describes.
+- Before the Review is sent, the Validator checks that each piece of Evidence actually shows the behavior its criterion describes.
 
 #### FR-22: Visual-first, before/after Evidence
 For any criterion with a visible result, the Evidence includes a visual. If the Task changes something that already existed visibly, the Evidence includes a before/after pair.
-- Evidence that is only test output for a criterion with a visible result is labelled as Degraded Evidence in the Review.
+- After a Correction, the next Review opens with before/after pairs against the Evidence in the previous Review.
+- Evidence that is only test output for a criterion with a visible result is labeled as Degraded Evidence in the Review.
 
 #### FR-23: Phone-native Evidence
 Evidence is delivered in forms a phone shows inline: images, videos of 60 seconds or less, and small files such as APKs and STLs.
-- Each screencast shows only the behaviour its criterion covers.
+- Each screencast shows only the behavior its criterion covers.
 
 #### FR-24: Demo when feasible
 When the Recipe supports a Demo and the Task changes something the Owner can try, the Review includes one: an installable APK, a WebGL link, a preview URL or an STL download.
@@ -296,18 +293,18 @@ When a Task is reviewable, the Owner receives a Review. It contains, in order:
 The Owner can accept a Review with one tap. Accepting starts Integration (FR-29).
 
 #### FR-28: Correction, Progress Peek, status, Stuck replies
-- **Correction:** the Owner can request changes by text or voice. After Intake interprets the note (FR-10), the same Task returns to the Implementer on the same Branch with the note and the previous Evidence in context. There is no new intake: the original criteria still apply, plus the note. The next Review opens with what changed since the previous Review (FR-22). Realizes UJ-3.
+- **Correction:** the Owner can request changes by text or voice. After Intake interprets the note (FR-10), the same Task returns to the Implementer on the same Branch with the note and the previous Evidence in context. No new Task Contract is drafted: the original criteria still apply, plus the note. The next Review opens with what changed since the previous Review (FR-22). Realizes UJ-3.
 - **Progress Peek:** the Owner can request a Progress Peek on any running Task. A Peek never interrupts or restarts a Stage. Realizes UJ-5.
 - **Status:** the Owner can request a list of all Tasks and their states.
 - **Stuck:** the Owner can answer a Stuck message by amending the contract, dropping a criterion, raising the budget or cancelling. Intake interprets the reply (FR-10).
 
 ### 4.7 Integration & Release
-**Description:** Accept does not mean merge. After Accept, the Coordinator rebases the Branch on main, re-runs the Validator and CI, merges, and then runs the Recipe's Release step. Nothing changed after the Owner accepted may reach a Release without a new Review.
+**Description:** Accept does not mean merge. Integration (FR-29) comes first, then the Recipe's Release step (FR-30). Nothing changed after the Owner accepted may reach a Release without a new Review.
 
 #### FR-29: Integration after Accept
 On Accept, the Coordinator rebases on main, re-runs the Validator and CI, and then merges.
 - The merge completes without a new Review only when the rebase was clean and the Validator and CI pass.
-- If the rebase conflicts or re-validation fails, the Task goes back to the Implementer (this uses the Iteration Budget). After any Implementer run that follows Accept, the Owner receives a new Review before anything is merged.
+- If the rebase conflicts or re-validation fails, the Task goes back to the Implementer; that run uses the Iteration Budget. After any Implementer run that follows Accept, the Owner receives a new Review before anything is merged.
 
 #### FR-30: Recipe-defined Release
 After merge, Antipode runs the Recipe's Release step, if one is declared, and confirms the outcome to the Owner. Example: "released as internal build 0.4.2."
@@ -327,7 +324,7 @@ Antipode records tokens, wall time and the estimated Usage Window share for ever
 
 - **NFR-1 Review time:** a typical Review takes about 1 minute to judge on a phone, including watching the Evidence, and never more than 2 minutes.
 - **NFR-2 Durability:** restarting Antipode or the Mac loses no Task state, Evidence or Parking Lot entry (FR-11, FR-25).
-- **NFR-3 Determinism:** only the Coordinator changes Task state, and only from recorded state. LLM judgement enters only through bounded Stage outputs: Triage's choice and Intake's structured interpretation, which the Owner confirms where FR-10 requires it.
+- **NFR-3 Determinism:** only the Coordinator changes Task state, and only from recorded state. LLM judgment enters only through bounded Stage outputs: Triage's choice and Intake's structured interpretation, which the Owner confirms where FR-10 requires it.
 - **NFR-4 Isolation:** Stages write only to their own Task's Branch and get only the non-production secrets the Recipe names (FR-5, FR-20). Production credentials are available only to the Release step.
 - **NFR-5 Observability:** every Stage leaves a log and its output in the Task record. The Owner can retrieve them at any time.
 - **NFR-6 Acknowledgement:** every Owner action in Telegram (approve, accept, correct, peek, pause, cancel) is acknowledged within 5 seconds, even when the work it triggers takes longer.
@@ -344,8 +341,8 @@ Antipode records tokens, wall time and the estimated Usage Window share for ever
 - **Owner review capacity is the factory's ceiling.** One person's attention limits throughput. Mitigations: Review Queue backpressure (FR-16), visual-first Reviews (FR-22, FR-26) and the time target in NFR-1.
 - **Agents can loop.** Triage, Evidence rework and Integration rework can all cycle. Mitigation: one Iteration Budget that counts every Implementer run (FR-13). It is the only brake, so the default budget must be tuned early.
 - **Subscription limits and terms.** The usage figures are approximate, and Anthropic can enforce its terms without notice. Mitigations: window budgeting (FR-17) and the API-key decision trigger (§6).
-- **Recipe burden.** Per-Project build, preview and evidence setup is real work that falls on the Owner. Mitigation: the bootstrap gate (FR-3) shows quickly whether a Recipe works. Example Recipes are an open question (§12 Q7).
-- **Evidence that looks right but isn't.** Polished Evidence could hide a wrong result. Mitigations: the Validator checks that each piece of Evidence shows its criterion (FR-21), and Degraded Evidence is labelled (FR-22).
+- **Recipe burden.** Per-Project build, preview and evidence setup is real work that falls on the Owner. Mitigation: the bootstrap gate (FR-3) shows quickly whether a Recipe works. Example Recipes are an open question (§12 Q6).
+- **Evidence that looks right but isn't.** Polished Evidence could hide a wrong result. Mitigations: the Validator checks that each piece of Evidence shows its criterion (FR-21), and Degraded Evidence is labeled (FR-22).
 
 ## 8. Tone of Owner-facing Messages
 
@@ -395,7 +392,7 @@ If time runs short, cut from the bottom of this list:
 ## 11. Success Metrics
 
 **Primary**
-- **SM-1:** within about 3 weeks of the first Project's bootstrap, the owner uses the Android training tracker for real workouts, having steered most of its development from the phone. Validates FR-7, FR-26–28.
+- **SM-1:** within about 3 weeks of the first Project's bootstrap, the Owner uses the Android training tracker for real workouts, having steered most of its development from the phone. Validates FR-7, FR-26–28.
 - **SM-2:** the median Owner time per Review is about 1 minute and never above 2 minutes. Validates FR-23, FR-26, NFR-1.
 
 **Secondary**
@@ -406,7 +403,7 @@ If time runs short, cut from the bottom of this list:
 **Counter-metrics (do not optimize)**
 - **SM-C1:** Reviews per week. More is not better: many tiny Tasks push routine work back onto the Owner. Counterbalances SM-2.
 - **SM-C2:** the first-try Accept rate on its own. Pushing it up can mean weak criteria or cosmetic Evidence. Counterbalances SM-3.
-- **SM-C3:** tokens per Task on its own. A cheap Task that needs extra Corrections costs the Owner's time, which is the scarcest resource. Counterbalances FR-31.
+- **SM-C3:** tokens per Task on its own. A cheap Task that needs extra Corrections costs the Owner's time, which is the scarcest resource. Counterbalances cost reporting (FR-31); there is no cost target.
 
 ## 12. Open Questions
 
