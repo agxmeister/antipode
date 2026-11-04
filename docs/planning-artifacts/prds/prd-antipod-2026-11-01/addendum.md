@@ -14,6 +14,15 @@ Depth that belongs downstream (architecture, UX), not in the PRD itself.
   - Web-type projects (future): a per-Branch container behind a reverse proxy (Traefik/Caddy) with wildcard hostnames on a private network. Coolify-style PR previews are the reference pattern.
 - **Previews sleep on inactivity.** They're the only long-lived cost. Agent sessions never idle while waiting on the Owner.
 
+## Post-MVP host: dedicated VM
+
+The Owner's Mac is the MVP host only. A dedicated VM is the intended next host. Implications for architecture:
+- Keep the Coordinator, Container Runners and the Telegram bot host-agnostic.
+- Host Runner steps are the portability risk:
+  - The Android emulator needs a VM with KVM or nested virtualization.
+  - The Unity editor on Linux needs a license, and may need a GPU or software rendering for recordings.
+- Recipes should treat "Host Runner" as "a named capability of the host", not as "macOS".
+
 ## Rejected alternatives (with reasons)
 
 - **Orchestrator agent** — rejected. It is nondeterministic and loses state on restart. Replaced by a deterministic Coordinator plus a bounded Triage Stage.

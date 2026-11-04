@@ -2,7 +2,7 @@
 title: Antipode — PRD
 status: draft
 created: 2026-11-01
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 
 # PRD: Antipode
@@ -336,7 +336,7 @@ Antipode records tokens, wall time and the estimated Usage Window share for ever
 
 - **Subscription terms (cost and safety):** the MVP runs the unmodified Claude Code CLI on the Owner's own subscription. Anthropic's terms assume "ordinary, individual usage." The concurrency cap (FR-15), Review Queue backpressure (FR-16) and window budgeting (FR-17) keep usage close to that. Switching to API keys must stay a configuration change, not a redesign. **Decision trigger:** once Antipode has run daily for a week, the Owner decides whether API-key mode moves into the MVP. See `research-landscape.md`.
 - **Privacy:** Evidence and Demos are private to the Owner. They are delivered only through Telegram or through authenticated or private-network links (FR-24).
-- **Single machine:** everything runs on the Owner's Mac. `[ASSUMPTION: the Mac stays powered and online while Tasks run, for example a plugged-in laptop or an always-on Mac. On sleep, Tasks pause and later resume; they do not fail.]`
+- **Single machine, MVP only:** everything runs on the Owner's Mac laptop. The laptop stays plugged in and awake while Tasks run. If it sleeps anyway, Tasks pause and resume; they do not fail. A dedicated VM is the intended host after the MVP, so nothing may assume macOS beyond what a Host Runner step declares (see §10.3).
 - **Licensed tools:** Host Runner steps may depend on licensed software such as Unity. Antipode uses the Owner's existing installation and license and does not provision them.
 
 ## 7. Risks
@@ -386,7 +386,7 @@ If time runs short, cut from the bottom of this list:
 - Web UI. Telegram is enough for one Owner. Phase two.
 - Multi-vendor agents such as Codex. Role Config leaves room for them. Phase two.
 - API-key billing. Phase two, kept as a configuration switch (see the §6 decision trigger).
-- Cluster, cloud or bare-metal deployment. One Mac is enough to prove the value.
+- Running on a dedicated VM. This is the intended next host; the MVP runs on the Owner's Mac only to prove value. Cluster, cloud or bare-metal deployment comes later still.
 - An automated reviewer agent replacing the Owner. Only after Evidence quality is proven.
 - Upstream ideation and spec writing. Phase two.
 - iOS for the training app. Android comes first.
@@ -425,4 +425,3 @@ If time runs short, cut from the bottom of this list:
 - §4.3 FR-17: subscription usage and the window position can be read or estimated from Claude Code.
 - §4.4 FR-20: each Project's Recipe decides where CI runs.
 - §4.7 FR-30: a failed Release does not automatically roll back main.
-- §6: the Mac stays powered and online while Tasks run. On sleep, Tasks pause and later resume.
