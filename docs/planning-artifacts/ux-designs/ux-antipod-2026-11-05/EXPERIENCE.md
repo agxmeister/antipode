@@ -19,7 +19,7 @@ sources:
   - `[NOTE FOR ARCHITECTURE: only the Owner's Telegram user ID is honored; messages from anyone else are ignored.]`
   - `[NOTE FOR ARCHITECTURE: voice notes are transcribed by Antipode, because bots don't get Telegram's transcription.]`
   - `[NOTE FOR ARCHITECTURE: callback_data is ≤64 bytes, so buttons carry short opaque IDs.]`
-  - `[NOTE FOR ARCHITECTURE: bot file uploads are capped at 50 MB; larger Demos go out as authenticated links (FR-24).]`
+  - `[NOTE FOR ARCHITECTURE: bot file uploads are capped at 50 MB; larger Demos go out as authenticated links (FR-24).]` `[ARCHITECTURE: link Demos are post-MVP (spine AD-13, Deferred); in the MVP a Demo over 50 MB is reported as "file too large, not sent".]`
 - **Language:** English only.
 - **Input modalities:** button taps, text, voice notes and replies to bot messages.
 
@@ -88,7 +88,7 @@ Behavioral rules only. Visual specs are in `DESIGN.md` → Components.
 |---|---|
 | **Draft card** | Shows the goal, numbered criteria and the Evidence kind of each criterion, and fits one phone screen (FR-7). Up to 2 questions, each with quick-answer buttons when the answer is closed. **Approve** appears only when every question is answered and every criterion has feasible Evidence (FR-8). Until then a line reads `Approve after: answer Q1`. Replying with text or voice revises the draft, and the card is edited in place, not reposted. **Discard** needs no confirmation and can be undone from the edited card for 1 min. `[ASSUMPTION]` |
 | **Evidence message** | One message per criterion: a photo, a video (≤60 s) or a before/after composite. If compositing fails, two separately labelled photos (`DESIGN.md` → before-after-composite). Never an album. Caption per `{components.evidence-caption.pattern}`. All Evidence messages are sent silently; only the Review card makes a sound. |
-| **Demo message** | An APK/STL sent as a Telegram file, or a WebGL/preview link, captioned `Demo · ${what to try}`. Files over the upload limit become authenticated links. Sent silently, after the Evidence and before the card. |
+| **Demo message** | An APK/STL sent as a Telegram file, or a WebGL/preview link, captioned `Demo · ${what to try}`. Files over the upload limit become authenticated links `[POST-MVP]`; in the MVP the caption reads `Demo · ${what to try} · file too large, not sent`. Sent silently, after the Evidence and before the card. |
 | **Review card** | Always the last message of a Review, so the buttons are under the thumb. Rows: 1) `Accept` · `Request changes`; 2) Parking Lot promotion (see below). After any tap the card is **edited in place**. On Accept, the keyboard becomes `[Undo]` for 10 s and is then removed. On Request changes, the keyboard is removed at once. A state line is appended (`✅ Accepted · integrating` → `📦 Released 0.4.2`, or `✅ Merged · no release step`). Blocks that don't apply (no Demo, empty Parking Lot, no before/after) are omitted without a placeholder. Release confirmation is also sent as a silent reply to the card, so it appears in the chat flow (UJ-2). |
 | **Parking Lot on the card** | Each finding has its own line, `🅿️ P1 timer text overlaps on very small screens`. With 1–2 findings, there is one button per finding (`🅿️ P1 → Task`). With 3 or more, a single `🅿️ Parked (n) →` button sends the list. Promoting a finding sends it to Intake, which replies with a Draft card linked to the source Task. Findings that are not promoted remain in `/parked` after Accept. Nothing is ever auto-drafted (OQ7). |
 | **Correction prompt** | Tapping `Request changes` sends a force-reply message: `What should change on #12?` The Owner answers by text or voice. Intake interprets the answer (FR-10). If the Correction only adds a note under the existing criteria, it goes straight back to the Task with no confirmation step. If it changes criteria, it becomes an Interpretation card first. |
@@ -135,7 +135,7 @@ Behavioral rules only. Visual specs are in `DESIGN.md` → Components.
 | No cost data yet | Cost reply | `No usage recorded yet.` |
 | Ambiguous Owner Message | Reply | One question with quick-answer or Task buttons (FR-10). Nothing acts until it is answered. |
 | Peek on non-running Task | Reply | `#${id} is ${state} — nothing to peek.` |
-| Demo preview asleep | Demo link | The link wakes the preview (FR-24). If the wake takes more than a few seconds, the bot replies `Waking preview · ~30 s`. |
+| Demo preview asleep `[POST-MVP]` | Demo link | The link wakes the preview (FR-24). If the wake takes more than a few seconds, the bot replies `Waking preview · ~30 s`. |
 | Evidence send failed | None, then notice | Retried silently. After the retry limit, a loud `❌ #${id} Review couldn't be delivered: ${reason}`, followed by `/evidence ${id}` once it is fixed. |
 | Unanswered Correction prompt | Force-reply | Nothing happens; the Task stays in review. The next free text that replies to the prompt is the Correction. |
 | Stale button | Toast | Tapping a button on an outdated card: `This Review was replaced by a newer one.` The bot then replies to the newer card. |

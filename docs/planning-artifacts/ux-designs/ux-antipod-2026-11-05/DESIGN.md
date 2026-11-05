@@ -126,7 +126,7 @@ Each card lists its blocks top to bottom. "Buttons" are inline-keyboard rows; on
 - **Evidence message.** A photo or video with its caption per `{components.evidence-caption.pattern}`. A Degraded caption adds ` · degraded: ${reason}` on the same line. The Task ID prefix keeps interleaved messages attributable.
 - **Before/after composite.** A single image with two labelled halves (`{components.before-after-composite}`). After a Correction, the "before" half is the previous Review's Evidence (FR-22). If compositing fails, send two separate photos, each with its own burned-in BEFORE/AFTER label and full caption. Never send an album.
 - **Callout box.** An optional stroke rectangle with a halo (`{components.callout-box}`) around the region a criterion describes. The Evidence Producer adds it when the change is small within a full screen.
-- **Demo message.** A file (APK/STL) or a link, with the caption `Demo · ${what to try}`. Any file that exceeds the Telegram bot upload limit is replaced by an authenticated link with the caption `Demo · ${what to try} · link (file too large)`.
+- **Demo message.** A file (APK/STL) or a link, with the caption `Demo · ${what to try}`. Any file that exceeds the Telegram bot upload limit is replaced by an authenticated link with the caption `Demo · ${what to try} · link (file too large)` `[POST-MVP]`; in the MVP the caption is `Demo · ${what to try} · file too large, not sent`.
 - **Review card.**
   1. Title `{components.review-card.titlePattern}`. On a re-review the title line is followed by `Changed: ${one line}`.
   2. One-line summary.
