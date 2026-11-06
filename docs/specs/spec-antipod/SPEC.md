@@ -3,6 +3,7 @@ id: SPEC-antipod
 companions:
   - glossary.md
   - success-metrics.md
+  - config-defaults.md
   - ../../planning-artifacts/architecture/architecture-antipod-2026-11-05/ARCHITECTURE-SPINE.md
   - ../../planning-artifacts/ux-designs/ux-antipod-2026-11-05/EXPERIENCE.md
   - ../../planning-artifacts/ux-designs/ux-antipod-2026-11-05/DESIGN.md
@@ -125,7 +126,7 @@ A pain and an opportunity. The Owner (agxmeister) has personal software projects
   - **success:** `/evidence <id>` resends the Task's Evidence and a read-only copy of its last Review card after the Branch is merged or deleted; Evidence files and rows are never updated or deleted.
 
 - **CAP-26** Review message (FR-26)
-  - **intent:** A reviewable Task reaches the Owner as one Review: Evidence per criterion, the Demo, then a card with a one-line summary, criteria strip, Parking Lot, cost line and `Accept` / `Request changes`.
+  - **intent:** A reviewable Task reaches the Owner as one Review spread over messages: Evidence per criterion, the Demo, then a card with a one-line summary, criteria strip, Parking Lot, cost line and `Accept` / `Request changes` (the Owner confirmed this reading of FR-26 on 2026-11-06).
   - **success:** The Review is judgeable on a phone without opening the repo, a diff or a laptop; prose beyond labels is at most 5 short lines; only the card makes a sound; one Review sequence at a time per chat; the card is edited in place after any tap.
 
 - **CAP-27** Accept (FR-27)
@@ -164,7 +165,7 @@ A pain and an opportunity. The Owner (agxmeister) has personal software projects
 - Every Owner action is acknowledged within 5 s even when the work takes longer.
 - MVP host is the Owner's Mac, plugged in and awake; sleep pauses Tasks and never fails them. Nothing outside the host adapter assumes macOS, and Recipes name host capabilities, not paths, so a Linux VM is the next host without redesign.
 - Isolation: Stages write only their own worktree and receive no secret values; `PROD_` secrets reach only the release step; Recipe, Role Config and inbox are read from pinned `main`, never from a Task Branch.
-- Concurrency is 1–3 Tasks (default 2); backpressure holds starts at 3 open Reviews globally; one Iteration Budget per Task counts every Implementer run except Corrections, retries, resumes and amendments.
+- Concurrency is 1–3 Tasks (default 2); backpressure holds starts at 3 open Reviews globally; one Iteration Budget per Task (default 5) counts every Implementer run except Corrections, retries, resumes and amendments. Initial limits, Role timeouts and retry counts are in `config-defaults.md`; all are configuration, none are code.
 - Licensed host tools (Unity, Android SDK) are the Owner's existing installations; Antipode never provisions them.
 - Owner-facing copy follows EXPERIENCE.md and DESIGN.md: outcome first, proof before prose, no apologies or narration, glyphs always followed by text, one card per Review round edited in place.
 - Stack, layering, data model and testing strategy are fixed by the architecture spine (AD-1..AD-24).
@@ -192,17 +193,11 @@ Within about three weeks of the training tracker's bootstrap, the Owner logs rea
 
 - A BMad story maps to a Task Contract through Intake alone; a deterministic parser is added only if that proves unreliable.
 - A failed Release never rolls back `main`.
-- The Usage Window is read from the undocumented OAuth usage endpoint Claude Code's `/usage` uses, with a local estimator as fallback; per-Stage window share is the utilization delta sampled after the Stage.
+- The Usage Window endpoint (verified 2026-11-06, see `config-defaults.md`) stays undocumented and may change; the local estimator remains the fallback, and per-Stage window share is the utilization delta sampled after the Stage.
 - The Stage agent runs on the host; isolation is Claude Code permission policy plus a secret-free environment, not OS enforcement, until the VM host.
 - Secret values live in mode-600 env files under `$ANTIPOD_HOME`; macOS Keychain is deferred.
 - Voice notes are transcribed locally with whisper.cpp and never leave the Mac.
 - Registration happens by `/register <repo>` from the Project group; the `antipod register` CLI is the fallback on the same code path.
-- UX calls not confirmed by the PRD: Discard undo of 1 min; `Raise budget +2`; a callout box when the changed region is under about a quarter of the frame; landscape composites stack vertically; no home chat (an `Elsewhere:` line instead); bot name Antipode with a monogram avatar; neutral function-only annotation colors; the cost reply layout.
-
-## Open Questions
-
-- FR-26 reading: the Review is spread across messages with the summary on the card after the media, so the buttons sit under the thumb. EXPERIENCE.md asks the PM to confirm; does the Owner confirm?
-- Is the working title "Antipode" final? The PRD and DESIGN.md both ask.
-- Usage Window spike (PRD OQ4): does the usage endpoint work from the daemon? Until known, CAP-17 runs on the estimator.
-- Unity automation spike (PRD OQ5): can the editor be driven reliably through the uplink MCP? Needed before cut-line step 4.
-- Initial config values (PRD OQ8): Iteration Budget default, Role timeouts, retries, `max_turns` and `usage.pause_at_percent`.
+- UX calls not confirmed by the PRD: Discard undo of 1 min; `Raise budget +2`; a callout box when the changed region is under about a quarter of the frame; landscape composites stack vertically; no home chat (an `Elsewhere:` line instead); a monogram avatar; neutral function-only annotation colors; the cost reply layout.
+- The Unity editor can be driven reliably through the uplink MCP; verified by a spike before cut-line step 4 (spine Deferred), not a decision the Owner needs to make now.
+- The config defaults in `config-defaults.md` are starting values; the first Project tunes them.

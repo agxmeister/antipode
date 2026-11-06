@@ -6,7 +6,7 @@ updated: 2026-11-04
 ---
 
 # PRD: Antipode
-*Working title — confirm.*
+*Name confirmed by the Owner on 2026-11-06.*
 
 ## 0. Document Purpose
 
@@ -288,6 +288,7 @@ When a Task is reviewable, the Owner receives a Review. It contains, in order:
 
 - The Review can be judged on a phone without opening the repo, a diff or a laptop.
 - Prose beyond the criterion labels is no more than 5 short lines.
+- The order may span several messages: Evidence and the Demo arrive first as media, and the final card carries the summary, criteria, Parking Lot, cost and buttons, so the buttons sit under the thumb. Confirmed by the Owner on 2026-11-06 (see `EXPERIENCE.md`).
 
 #### FR-27: Accept
 The Owner can accept a Review with one tap. Accepting starts Integration (FR-29).
@@ -410,11 +411,11 @@ If time runs short, cut from the bottom of this list:
 1. **Where CI runs.** Hosted CI or a local runner on the Mac, per Project? Unity and Android emulator steps likely need local. → architecture.
 2. **How the phone reaches a Demo.** A private network, an authenticated tunnel, or files sent directly in Telegram? → architecture.
 3. **Evidence storage.** On the Mac only, or also off the machine, and how long is it kept? → architecture.
-4. **Usage Window visibility.** What does Claude Code actually expose about subscription usage? Is budgeting a reading or an estimate? → early spike.
+4. **Usage Window visibility.** What does Claude Code actually expose about subscription usage? Is budgeting a reading or an estimate? → early spike. **Resolved 2026-11-06:** a reading; the OAuth usage endpoint returns five-hour and weekly utilization with reset times (see `docs/specs/spec-antipod/config-defaults.md`).
 5. **Unity automation.** Can the Unity editor be driven headlessly or through an MCP reliably enough for the Implementer, Validator and Evidence Stages under the Owner's license? → spike before step 4 of §10.2.
 6. **Recipe schema.** What is the minimum Recipe for each Project type? Should Antipode ship example Recipes for Android, Unity and OpenSCAD? → architecture.
 7. **Parking Lot lifecycle.** Do parked findings become draft Task Contracts automatically, or only when the Owner asks? → UX.
-8. **Iteration Budget default.** What starting value? → tune during the first Project.
+8. **Iteration Budget default.** What starting value? → tune during the first Project. **Starting value set 2026-11-06:** 5, with the other limits and Role timeouts in `docs/specs/spec-antipod/config-defaults.md`.
 
 ## 13. Assumptions Index
 
