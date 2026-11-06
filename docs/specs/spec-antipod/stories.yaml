@@ -1,0 +1,135 @@
+# Cut-line step 1: Coordinator lifecycle and the Telegram Review, Accept and Correction loop (stories 1-17)
+- id: "1"
+  title: Scaffold and operations envelope
+  description: >-
+    Package, enforced import layering, ANTIPOD_HOME config with zod and SIGHUP reload, pino logging, SQLite with
+    forward-only migrations, launchd plist and the antipod backup/upgrade CLI (spine AD-1, AD-2, AD-15, AD-23, AD-24).
+  spec_checkpoint: true
+  done_checkpoint: true
+- id: "2"
+  title: Coordinator core
+  description: >-
+    Domain types, the persistent Task FSM with a table-driven transitions test, commit-then-act effects, crash-only
+    recovery and a sleep-aware clock (CAP-11; spine AD-3, AD-18).
+  spec_checkpoint: true
+- id: "3"
+  title: Scheduler gates
+  description: >-
+    Dependency, concurrency-cap, Review-backpressure and usage-hold gates in the spine's fixed order, tested with a
+    fake WindowReader (CAP-15, CAP-16; spine AD-11).
+- id: "4"
+  title: Telegram adapter
+  description: >-
+    Long polling, owner-only access, persisted outbox with retries, state-bound callbacks, 5 s acknowledgement,
+    card-template module and setMyCommands (spine AD-10, conventions; EXPERIENCE.md, DESIGN.md).
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Tests never use the Owner's Claude login or the production bot token; run against a second bot via a separate
+    ANTIPOD_HOME.
+- id: "5"
+  title: Git adapter, Recipe validation and registration
+  description: >-
+    Bare clone per Project, worktrees, Recipe validation (no secret values, PROD_ only in release), config read from
+    pinned main, and /register with the antipod register CLI fallback (CAP-1, CAP-4, CAP-5 validation; AD-5, AD-22).
+- id: "6"
+  title: Step runners
+  description: >-
+    Podman and host StepRunners behind one step contract, exclusive capability leases, the antipod step socket,
+    Preview Data from fixtures and secrets passed by name (CAP-2, CAP-5; spine AD-7, AD-14).
+- id: "7"
+  title: Claude CLI AgentRunner and Role Configs
+  description: >-
+    Stages as claude -p subprocesses with typed output, per-Role timeouts and retries, layered Role Config and
+    write-deny permissions, plus a fake claude for tests (CAP-12, CAP-18, CAP-20; spine AD-4, AD-6, AD-15).
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Tests never use the Owner's Claude login or the production bot token; run against a second bot via a separate
+    ANTIPOD_HOME.
+- id: "8"
+  title: Intake drafts from text and the inbox
+  description: >-
+    Draft cards from Telegram text and repo-inbox files, the Evidence feasibility check, Approve/Revise/Discard with
+    undo, and the contract committed as a projection of stored rows (CAP-4, CAP-6, CAP-7 text, CAP-8, CAP-9).
+- id: "9"
+  title: Implement, validate and triage loop
+  description: >-
+    Implementer, Validator and Triage Stages routed by outcome under one Iteration Budget, Branch push and Recipe test
+    after every Implementer run, and the Stuck card (CAP-13, CAP-19, CAP-20).
+  spec_checkpoint: true
+- id: "10"
+  title: Evidence production, ingest and rendering
+  description: >-
+    Evidence Producer Stage, ingest limits (60 s video, 50 MB), immutable criterion-linked store, Validator evidence
+    mode, and the before/after renderer using DESIGN.md tokens (CAP-21, CAP-22, CAP-23, CAP-25 store; AD-8, AD-20).
+  spec_checkpoint: true
+- id: "11"
+  title: Review sequence, Accept and Correction
+  description: >-
+    Review sent as Evidence messages, Demo file and card; Accept with 10 s Undo, superseded-card handling, and
+    Correction back to the Implementer without budget use (CAP-24, CAP-26, CAP-27, CAP-28 Correction).
+  spec_checkpoint: true
+- id: "12"
+  title: Integration and Release
+  description: >-
+    After Accept: rebase on main, re-test, re-validate and fast-forward merge, with a Re-review when rebase needed
+    changes; then the Recipe release step with Retry/Leave it on failure (CAP-29, CAP-30; spine AD-13).
+- id: "13"
+  title: Bootstrap gate and end-to-end smoke test
+  description: >-
+    Bootstrap Task per new Project gating feature Tasks until its Review is accepted, never merged; plus the
+    openscad.yaml end-to-end smoke test with the fake claude (CAP-3; spine AD-13, AD-24).
+  invoke_dev_with: >-
+    Tests never use the Owner's Claude login or the production bot token; run against a second bot via a separate
+    ANTIPOD_HOME.
+- id: "14"
+  title: Owner Messages and controls
+  description: >-
+    Every free-text message interpreted into one typed instruction with Confirm where criteria, budget or cancellation
+    change; pause/resume/cancel/amend, Stuck replies and Task resolution (CAP-10, CAP-14, CAP-28 Stuck; AD-9).
+- id: "15"
+  title: Read-only commands
+  description: >-
+    /status, /peek, /evidence and /log replies as specified in EXPERIENCE.md (CAP-25, CAP-28 Peek and status, CAP-32).
+- id: "16"
+  title: Usage window and cost
+  description: >-
+    WindowReader on the OAuth usage endpoint with estimator fallback, hold and resume notices, per-Stage cost samples,
+    the Review cost line and /cost (CAP-17, CAP-31; spine AD-12; config-defaults.md).
+- id: "17"
+  title: Parking Lot promotion
+  description: >-
+    Promote a parked finding to a linked Draft from the card or /parked, or dismiss it; nothing drafted automatically
+    (CAP-33).
+  done_checkpoint: true
+# Cut-line step 2: Android Evidence on the training tracker
+- id: "18"
+  title: Android training tracker onboarding
+  description: >-
+    Android Recipe with emulator screenshots and screencasts and an APK Demo, then registration and bootstrap of the
+    real training tracker (SPEC build order step 2; success signal SM-1).
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    The training app lives in its own repo; this story makes Antipode onboard it and builds no app features beyond
+    what the bootstrap needs.
+# Cut-line step 3: voice intake
+- id: "19"
+  title: Voice intake
+  description: >-
+    Voice notes converted with ffmpeg and transcribed locally by whisper.cpp before Intake (CAP-7 voice; spine AD-17).
+  done_checkpoint: true
+# Cut-line step 4: Unity and OpenSCAD Projects
+- id: "20"
+  title: OpenSCAD Project
+  description: >-
+    OpenSCAD Recipe with rendered views as Evidence and an STL Demo, registered and bootstrapped as a real Project
+    (SPEC build order step 4).
+- id: "21"
+  title: Unity Project
+  description: >-
+    Unity automation spike with the uplink MCP, then the Unity Recipe, Unity MCP in Role Config and a zipped WebGL
+    Demo (SPEC build order step 4; assumption on Unity automation, spine Deferred OQ5).
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Run the uplink-MCP spike first and stop with findings if Unity automation proves unreliable.
