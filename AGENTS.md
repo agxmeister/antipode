@@ -23,7 +23,8 @@ Antipode: a single-Owner daemon that turns Task contracts into Evidence-backed R
 
 - Use pnpm, never npm or yarn; it is not installed here yet, so run `corepack enable pnpm` first.
 - Node 24 LTS and TypeScript 7.0, per the spine's Stack table.
-- TODO (story 1-1): install, test (vitest 4), typecheck and lint commands; record the real invocations on the first refresh.
+- Install `pnpm install`; build `pnpm build` (tsc to `dist/`); typecheck `pnpm typecheck` (strict tsc, no emit); lint `pnpm lint` (dependency-cruiser AD-1 layering check, no ESLint); test `pnpm test` (vitest 4; one file: `pnpm test test/app/config.test.ts`).
+- Source imports use `.ts` extensions (tsc rewrites them to `.js`), so `node src/app/cli.ts <command>` runs without a build; keep syntax erasable (no enums, namespaces or parameter properties).
 
 ## Conventions that differ from defaults
 

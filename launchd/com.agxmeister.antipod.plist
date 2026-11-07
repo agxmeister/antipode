@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agxmeister.antipod</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{NODE_PATH}}</string>
+    <string>{{CLI_PATH}}</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ANTIPOD_HOME</key>
+    <string>{{ANTIPOD_HOME}}</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>{{ANTIPOD_HOME}}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- Only crashes before the logger starts land here; the daemon logs to logs/antipod.log. -->
+  <key>StandardOutPath</key>
+  <string>{{ANTIPOD_HOME}}/logs/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{ANTIPOD_HOME}}/logs/launchd.log</string>
+</dict>
+</plist>
