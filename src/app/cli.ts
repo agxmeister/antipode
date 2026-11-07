@@ -96,6 +96,7 @@ export async function main(argv: readonly string[], deps: CliDeps = defaultDeps(
             nodePath: process.execPath,
             cliPath: join(packageRoot, 'dist', 'app', 'cli.js'),
             home,
+            path: deps.env['PATH'] ?? '',
           }),
         );
         return 0;

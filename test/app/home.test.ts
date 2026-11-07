@@ -12,13 +12,13 @@ describe('home', () => {
     expect(resolveHome({ ANTIPOD_HOME: '' })).toBe(join(homedir(), '.antipod'));
   });
 
-  it('creates data, logs, run and a mode-700 secrets dir', () => {
-    const { root } = createTempHome();
+  it('creates the home, data, logs, run and secrets, all mode 700', () => {
+    const root = join(createTempHome().root, 'nested', 'home');
     const paths = ensureHome(root);
-    for (const dir of ['data', 'logs', 'run', 'secrets']) {
-      expect(statSync(join(root, dir)).isDirectory()).toBe(true);
+    for (const dir of [root, ...['data', 'logs', 'run', 'secrets'].map((name) => join(root, name))]) {
+      expect(statSync(dir).isDirectory()).toBe(true);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
     }
-    expect(statSync(paths.secrets).mode & 0o777).toBe(0o700);
     expect(paths.database).toBe(join(root, 'data', 'antipod.db'));
     expect(paths.log).toBe(join(root, 'logs', 'antipod.log'));
   });

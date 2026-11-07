@@ -5,6 +5,8 @@ export interface PlistValues {
   nodePath: string;
   cliPath: string;
   home: string;
+  /** PATH for the agent, so git, claude and Homebrew tools resolve under launchd. */
+  path: string;
 }
 
 export function plistTemplatePath(packageRoot: string): string {
@@ -20,7 +22,7 @@ function escapeXml(value: string): string {
     .replaceAll("'", '&apos;');
 }
 
-/** Fills the launchd template's placeholders; every path must be absolute. */
+/** Fills the launchd template's placeholders; every path must be absolute; relative PATH entries are dropped. */
 export function renderPlist(template: string, values: PlistValues): string {
   const replacements: Record<string, string> = {
     NODE_PATH: values.nodePath,
@@ -32,6 +34,9 @@ export function renderPlist(template: string, values: PlistValues): string {
       throw new Error(`plist value ${key} must be an absolute path, got "${value}"`);
     }
   }
+  // Relative entries (`.`, `node_modules/.bin`) mean nothing to launchd, which starts in ANTIPOD_HOME; drop them.
+  const pathSegments = values.path.split(':').filter((segment) => isAbsolute(segment));
+  replacements['PATH'] = pathSegments.join(':');
   return template.replace(/\{\{([A-Z_]+)\}\}/g, (match, key: string) => {
     const value = replacements[key];
     if (value === undefined) {

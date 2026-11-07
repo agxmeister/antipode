@@ -45,7 +45,7 @@ export async function backup({ paths, config, run }: BackupOptions): Promise<Bac
 
   const data = join(target, 'data');
   mkdirSync(data, { recursive: true });
-  const result = await run('rsync', ['-a', '--exclude', 'antipod.db*', `${paths.data}/`, `${data}/`]);
+  const result = await run('rsync', ['-a', '--exclude', '/antipod.db*', `${paths.data}/`, `${data}/`]);
   if (result.code !== 0) {
     throw new AntipodError('backup_failed', `rsync of ${paths.data} to ${data} failed (exit ${result.code})`);
   }

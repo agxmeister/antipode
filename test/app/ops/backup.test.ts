@@ -49,6 +49,22 @@ describe('antipod backup', () => {
     expect(existsSync(join(target, 'antipod.db'))).toBe(true);
   });
 
+  it('copies rows a running daemon has committed but not checkpointed', async () => {
+    const target = join(createTempHome(null).root, 'backup');
+    const home = await homeWithData(target);
+    const daemon = await bootDaemon({ env: home.env });
+    try {
+      daemon.db.prepare("INSERT INTO settings VALUES ('live', 'w', '2026-11-07T00:00:00Z')").run();
+      expect(existsSync(join(home.root, 'data', 'antipod.db-wal'))).toBe(true);
+      expect(await main(['backup'], deps(home.env).value)).toBe(0);
+    } finally {
+      await daemon.stop('test');
+    }
+    const db = new Database(join(target, 'antipod.db'), { readonly: true });
+    expect(db.prepare('SELECT value FROM settings WHERE key = ?').get('live')).toEqual({ value: 'w' });
+    db.close();
+  });
+
   it('fails with a message when backup.path is not set', async () => {
     const home = await homeWithData();
     const cli = deps(home.env);

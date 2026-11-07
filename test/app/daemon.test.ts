@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { bootDaemon, runDaemon } from '../../src/app/daemon.ts';
+import { AntipodError } from '../../src/core/domain/errors.ts';
 import { migrations } from '../../src/adapters/sqlite/migrations/index.ts';
 import { createTempHome, readLogLines, type TempHome } from '../helpers/home.ts';
 
@@ -71,6 +72,42 @@ describe('daemon', () => {
     expect(code).toBe(1);
     expect(reports.join('\n')).toMatch(/newer than this code/);
     expect(logOf(home).at(-1)).toMatchObject({ event: 'daemon_boot_failed', error_code: 'database_newer_than_code' });
+  });
+
+  it('applies logging.level at boot', async () => {
+    const home = createTempHome({ owner: { telegram_user_id: 1 }, logging: { level: 'debug' } });
+    const daemon = await bootDaemon({ env: home.env });
+    expect(daemon.logger.level).toBe('debug');
+    await daemon.stop('test');
+  });
+
+  it('refuses a second daemon on the same home while the first runs, and releases on stop', async () => {
+    const home = createTempHome();
+    const pidFile = join(home.root, 'run', 'antipod.pid');
+    const first = await bootDaemon({ env: home.env });
+    expect(readFileSync(pidFile, 'utf8').trim()).toBe(String(process.pid));
+
+    const second = bootDaemon({ env: home.env });
+    await expect(second).rejects.toThrow(AntipodError);
+    await expect(second).rejects.toThrow(`pid ${process.pid}`);
+    const reports: string[] = [];
+    expect(await runDaemon({ env: home.env, signals: new EventEmitter(), report: (l) => reports.push(l) })).toBe(1);
+    expect(reports.join('\n')).toContain('another daemon');
+    expect(existsSync(pidFile)).toBe(true);
+
+    await first.stop('test');
+    expect(existsSync(pidFile)).toBe(false);
+    expect(events(home)).toEqual(['daemon_started', 'daemon_stopped']);
+  });
+
+  it('replaces a stale pid file', async () => {
+    const home = createTempHome();
+    const pidFile = join(home.root, 'run', 'antipod.pid');
+    await (await bootDaemon({ env: home.env })).stop('test');
+    writeFileSync(pidFile, '999999\n');
+    const daemon = await bootDaemon({ env: home.env });
+    expect(readFileSync(pidFile, 'utf8').trim()).toBe(String(process.pid));
+    await daemon.stop('test');
   });
 
   it('applies an edited config on SIGHUP and logs config_reloaded', async () => {

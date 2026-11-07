@@ -56,10 +56,19 @@ export async function createLogger(
     await once(stream, 'ready');
   }
   const relink = (): void => {
-    if (stream.file !== null) {
+    if (stream.file === null) {
+      return;
+    }
+    try {
       linkCurrent(logPath, stream.file);
+    } catch (error) {
+      process.stderr.write(`antipod: cannot link ${logPath} to ${stream.file}: ${String(error)}\n`);
     }
   };
+  // A write or rotation failure must never become an uncaught exception that kills the daemon.
+  stream.on('error', (error: unknown) => {
+    process.stderr.write(`antipod: log stream error: ${String(error)}\n`);
+  });
   relink();
   stream.on('ready', relink);
 

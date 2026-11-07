@@ -4,6 +4,7 @@ import { AntipodError } from '../core/domain/errors.ts';
 import { loadConfig, type Config } from './config.ts';
 import { ensureHome, resolveHome, type HomePaths } from './home.ts';
 import { createLogger, type AppLogger, type Logger } from './logger.ts';
+import { acquirePidLock } from './pid-lock.ts';
 
 export type StopSignal = 'SIGTERM' | 'SIGINT';
 
@@ -41,7 +42,15 @@ function errorFields(error: unknown): Record<string, unknown> {
  */
 export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   const paths = ensureHome(resolveHome(options.env ?? process.env));
-  const appLogger: AppLogger = await createLogger(paths.log);
+  // Taken before the logger so a refused second daemon writes nothing into the live log.
+  const releaseLock = acquirePidLock(paths.pidFile);
+  let appLogger: AppLogger;
+  try {
+    appLogger = await createLogger(paths.log);
+  } catch (error) {
+    releaseLock();
+    throw error;
+  }
   const { logger } = appLogger;
 
   let config: Config;
@@ -62,8 +71,12 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     );
   } catch (error) {
     logger.fatal({ event: 'daemon_boot_failed', ...errorFields(error) }, 'daemon_boot_failed');
-    db?.close();
-    await appLogger.close();
+    try {
+      db?.close();
+    } finally {
+      await appLogger.close();
+      releaseLock();
+    }
     throw error;
   }
 
@@ -90,8 +103,12 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     stop(reason) {
       stopped ??= (async () => {
         logger.info({ event: 'daemon_stopped', reason }, 'daemon_stopped');
-        openDb.close();
-        await appLogger.close();
+        try {
+          openDb.close();
+        } finally {
+          await appLogger.close();
+          releaseLock();
+        }
       })();
       return stopped;
     },

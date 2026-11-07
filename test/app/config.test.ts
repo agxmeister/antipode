@@ -78,9 +78,25 @@ describe('config', () => {
     ).toEqual(['agent.auth', 'limit']);
   });
 
+  it('requires backup.path to be absolute', () => {
+    const error = (() => {
+      try {
+        parseConfig({ owner: { telegram_user_id: 1 }, backup: { path: '~/backups' } });
+      } catch (caught) {
+        return caught as ConfigInvalidError;
+      }
+      throw new Error('expected ConfigInvalidError');
+    })();
+    expect(error.issues).toEqual([{ path: 'backup.path', message: 'must be an absolute path' }]);
+    expect(issuesOf(() => parseConfig({ owner: { telegram_user_id: 1 }, backup: { path: 'rel/dir' } }))).toEqual([
+      'backup.path',
+    ]);
+  });
+
   it('reports unparseable YAML and a missing file', () => {
     const home = createTempHome(null);
     expect(issuesOf(() => loadConfig(join(home.root, 'config.yaml')))).toEqual(['(file)']);
+    expect(() => loadConfig(join(home.root, 'config.yaml'))).toThrow('cannot read config file (ENOENT)');
     home.writeConfigText('owner: [\n');
     expect(issuesOf(() => loadConfig(join(home.root, 'config.yaml')))).toEqual(['(yaml)']);
   });

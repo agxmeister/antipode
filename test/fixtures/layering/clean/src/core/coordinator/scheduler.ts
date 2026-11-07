@@ -1,3 +1,3 @@
-import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type { S } from '../ports/clock.ts';
-export const read = (s: S): string => readFileSync(String(s), 'utf8');
+export const id = (s: S): string => `${String(s)}-${randomUUID()}`;

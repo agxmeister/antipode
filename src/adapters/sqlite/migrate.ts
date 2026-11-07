@@ -33,11 +33,21 @@ export function migrate(db: SqliteDatabase, migrations: readonly Migration[] = a
   }
   const applied: number[] = [];
   for (const migration of migrations.slice(from)) {
-    db.transaction(() => {
-      db.exec(migration.sql);
-      db.pragma(`user_version = ${migration.id}`);
-    })();
-    applied.push(migration.id);
+    // IMMEDIATE takes the write lock up front; re-reading the version inside it skips a step
+    // another process applied in the meantime.
+    const ran = db
+      .transaction(() => {
+        if (schemaVersion(db) >= migration.id) {
+          return false;
+        }
+        db.exec(migration.sql);
+        db.pragma(`user_version = ${migration.id}`);
+        return true;
+      })
+      .immediate();
+    if (ran) {
+      applied.push(migration.id);
+    }
   }
   return { from, to: schemaVersion(db), applied };
 }

@@ -11,6 +11,7 @@ export interface HomePaths {
   secrets: string;
   database: string;
   log: string;
+  pidFile: string;
 }
 
 /** The instance directory: `ANTIPOD_HOME`, default `~/.antipod` (AD-23). */
@@ -31,16 +32,16 @@ export function homePaths(root: string): HomePaths {
     secrets: join(root, 'secrets'),
     database: join(data, 'antipod.db'),
     log: join(logs, 'antipod.log'),
+    pidFile: join(root, 'run', 'antipod.pid'),
   };
 }
 
-/** Creates `data/ logs/ run/ secrets/` under the home; `secrets/` is mode 700. */
+/** Creates the home and its `data/ logs/ run/ secrets/`, all mode 700 (owner-only). */
 export function ensureHome(root: string): HomePaths {
   const paths = homePaths(root);
-  for (const dir of [paths.data, paths.logs, paths.run]) {
-    mkdirSync(dir, { recursive: true });
+  for (const dir of [paths.root, paths.data, paths.logs, paths.run, paths.secrets]) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
   }
-  mkdirSync(paths.secrets, { recursive: true, mode: 0o700 });
-  chmodSync(paths.secrets, 0o700);
   return paths;
 }

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { ConfigInvalidError, type ConfigIssue } from '../core/domain/errors.ts';
@@ -55,7 +56,7 @@ export const configSchema = z.strictObject({
     .prefault({}),
   backup: z
     .strictObject({
-      path: z.string().min(1).optional(),
+      path: z.string().min(1).refine(isAbsolute, 'must be an absolute path').optional(),
     })
     .prefault({}),
   /** Host capability name → command on this host (AD-19). */
@@ -98,7 +99,8 @@ export function loadConfig(file: string): Config {
   try {
     text = readFileSync(file, 'utf8');
   } catch (error) {
-    throw new ConfigInvalidError(file, [{ path: '(file)', message: 'cannot read config file' }], {
+    const code = (error as NodeJS.ErrnoException).code ?? 'unknown error';
+    throw new ConfigInvalidError(file, [{ path: '(file)', message: `cannot read config file (${code})` }], {
       cause: error,
     });
   }
