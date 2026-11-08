@@ -7,6 +7,19 @@ import { ConfigInvalidError, type ConfigIssue } from '../core/domain/errors.ts';
 const positiveInt = z.int().positive();
 const nonNegativeInt = z.int().nonnegative();
 
+/** `roles.<role>`: the `role.yaml` values of config-defaults.md (file layering per AD-15 is story 1-7). */
+function roleSchema(defaults: { timeout_ms: number; retries: number; max_turns: number }) {
+  return z
+    .strictObject({
+      timeout_ms: positiveInt.default(defaults.timeout_ms),
+      retries: nonNegativeInt.default(defaults.retries),
+      max_turns: positiveInt.default(defaults.max_turns),
+    })
+    .prefault({});
+}
+
+const MINUTE = 60_000;
+
 /**
  * `$ANTIPOD_HOME/config.yaml` (AD-15). Defaults come from docs/specs/spec-antipod/config-defaults.md.
  * Objects are strict so a mistyped key is reported instead of silently ignored.
@@ -52,6 +65,15 @@ export const configSchema = z.strictObject({
   telegram: z
     .strictObject({
       stale_after_ms: positiveInt.default(300_000),
+    })
+    .prefault({}),
+  roles: z
+    .strictObject({
+      intake: roleSchema({ timeout_ms: 5 * MINUTE, retries: 2, max_turns: 25 }),
+      implementer: roleSchema({ timeout_ms: 45 * MINUTE, retries: 2, max_turns: 150 }),
+      validator: roleSchema({ timeout_ms: 20 * MINUTE, retries: 2, max_turns: 60 }),
+      'evidence-producer': roleSchema({ timeout_ms: 30 * MINUTE, retries: 2, max_turns: 80 }),
+      triage: roleSchema({ timeout_ms: 5 * MINUTE, retries: 2, max_turns: 15 }),
     })
     .prefault({}),
   backup: z

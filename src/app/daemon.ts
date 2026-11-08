@@ -1,6 +1,12 @@
 import { migrate } from '../adapters/sqlite/migrate.ts';
 import { openDatabase, type SqliteDatabase } from '../adapters/sqlite/db.ts';
+import { SqliteStore } from '../adapters/sqlite/store.ts';
+import { Coordinator } from '../core/coordinator/coordinator.ts';
+import { Deadlines } from '../core/coordinator/deadlines.ts';
+import { EffectExecutor } from '../core/coordinator/effects.ts';
+import { recover } from '../core/coordinator/recovery.ts';
 import { AntipodError } from '../core/domain/errors.ts';
+import { systemClock } from './clock.ts';
 import { loadConfig, type Config } from './config.ts';
 import { ensureHome, resolveHome, type HomePaths } from './home.ts';
 import { createLogger, type AppLogger, type Logger } from './logger.ts';
@@ -14,14 +20,21 @@ export interface SignalSource {
   off(signal: NodeJS.Signals, listener: () => void): unknown;
 }
 
+/** How often deadlines are checked and sleep is detected (AD-18). */
+export const DEADLINE_TICK_MS = 1000;
+
 export interface Daemon {
   readonly paths: HomePaths;
   readonly logger: Logger;
   readonly db: SqliteDatabase;
+  readonly store: SqliteStore;
+  readonly coordinator: Coordinator;
+  readonly executor: EffectExecutor;
+  readonly deadlines: Deadlines;
   config(): Config;
   /** Re-reads `config.yaml`; keeps the previous config when it is invalid. Returns whether it applied. */
   reload(): boolean;
-  /** Closes the database and the log stream. Idempotent. */
+  /** Stops the deadline tick, lets the executor settle, closes the database and the log stream. Idempotent. */
   stop(reason: string): Promise<void>;
 }
 
@@ -55,17 +68,41 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
 
   let config: Config;
   let db: SqliteDatabase | undefined;
+  let store: SqliteStore;
+  let coordinator: Coordinator;
+  let executor: EffectExecutor;
+  let deadlines: Deadlines;
   try {
     config = loadConfig(paths.config);
     logger.level = config.logging.level;
     db = openDatabase(paths.database);
     const result = migrate(db);
+
+    // Composition (AD-1): the core sees only ports; handlers for later stories plug in here.
+    store = new SqliteStore(db);
+    coordinator = new Coordinator({
+      store,
+      clock: systemClock,
+      log: logger,
+      policy: () => ({ limits: config.limits, roles: config.roles }),
+    });
+    executor = new EffectExecutor(store, systemClock, logger);
+    executor.register('back_online', (effect) => {
+      // The silent Telegram notice is a later handler; for now the gap is on record.
+      logger.info({ event: 'back_online', project_id: effect.project_id, gap_ms: effect.gap_ms }, 'back_online');
+    });
+    deadlines = new Deadlines(systemClock);
+    const recovery = await recover({ store, coordinator, executor, clock: systemClock, log: logger });
+    // Attached after recovery so nothing drains until recovery has settled the orphaned launches.
+    coordinator.onEffectsCommitted(() => executor.notify());
+
     logger.info(
       {
         event: 'daemon_started',
         home: paths.root,
         schema_version: result.to,
         migrations_applied: result.applied,
+        ...recovery,
       },
       'daemon_started',
     );
@@ -81,11 +118,25 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   }
 
   const openDb = db;
+  const tick = setInterval(() => {
+    const result = deadlines.tick();
+    if (result.sleep !== undefined) {
+      const { gapMs } = result.sleep;
+      logger.info({ event: 'sleep_detected', gap_ms: gapMs }, 'sleep_detected');
+      coordinator.backOnline(gapMs).catch((error: unknown) => {
+        logger.error({ event: 'back_online_failed', ...errorFields(error) }, 'back_online_failed');
+      });
+    }
+  }, DEADLINE_TICK_MS);
   let stopped: Promise<void> | undefined;
   return {
     paths,
     logger,
     db: openDb,
+    store,
+    coordinator,
+    executor,
+    deadlines,
     config: () => config,
     reload() {
       try {
@@ -102,6 +153,9 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     },
     stop(reason) {
       stopped ??= (async () => {
+        clearInterval(tick);
+        // Let an in-flight drain settle its rows before the database closes; pending rows replay at next boot.
+        await executor.drain();
         logger.info({ event: 'daemon_stopped', reason }, 'daemon_stopped');
         try {
           openDb.close();

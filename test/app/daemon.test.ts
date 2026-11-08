@@ -42,7 +42,30 @@ describe('daemon', () => {
     expect(db.pragma('user_version', { simple: true })).toBe(migrations.length);
     db.close();
     const started = logOf(home).find((line) => line['event'] === 'daemon_started');
-    expect(started).toMatchObject({ level: 30, msg: 'daemon_started', schema_version: migrations.length });
+    expect(started).toMatchObject({
+      level: 30,
+      msg: 'daemon_started',
+      schema_version: migrations.length,
+      stages_restarted: 0,
+      effects_orphaned: 0,
+      effects_replayed: 0,
+    });
+  });
+
+  it('wires the Coordinator core: a Task moves through the store and effects drain after commit', async () => {
+    const home = createTempHome();
+    const daemon = await bootDaemon({ env: home.env });
+    const project = await daemon.coordinator.createProject('p');
+    const task = await daemon.coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
+    expect(task.budget_limit).toBe(daemon.config().limits.iteration_budget);
+    await daemon.coordinator.applyEvent(task.id, { type: 'scheduler_start' });
+    await daemon.executor.drain();
+    expect(daemon.store.getTask(task.id)).toMatchObject({ state: 'implementing', budget_used: 1 });
+    // No start_stage handler yet (story 1-4): the effect fails no_handler and is logged, never left pending.
+    expect(daemon.store.effectsOfTask(task.id)).toMatchObject([{ kind: 'start_stage', status: 'failed', error: 'no_handler' }]);
+    expect(daemon.executor.has('back_online')).toBe(true);
+    await daemon.stop('test');
+    expect(logOf(home).find((line) => line['event'] === 'effect_failed')).toMatchObject({ level: 50, error: 'no_handler' });
   });
 
   it.each([

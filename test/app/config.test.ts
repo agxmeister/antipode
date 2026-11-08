@@ -31,6 +31,13 @@ describe('config', () => {
       intake: { retries: 2, context_messages: 10 },
       outbox: { retries: 5 },
       telegram: { stale_after_ms: 300_000 },
+      roles: {
+        intake: { timeout_ms: 300_000, retries: 2, max_turns: 25 },
+        implementer: { timeout_ms: 2_700_000, retries: 2, max_turns: 150 },
+        validator: { timeout_ms: 1_200_000, retries: 2, max_turns: 60 },
+        'evidence-producer': { timeout_ms: 1_800_000, retries: 2, max_turns: 80 },
+        triage: { timeout_ms: 300_000, retries: 2, max_turns: 15 },
+      },
       backup: {},
       capabilities: {},
       logging: { level: 'info' },
@@ -51,6 +58,15 @@ describe('config', () => {
     expect(config.backup.path).toBe('/Volumes/backup/antipod');
     expect(config.capabilities).toEqual({ openscad: '/opt/homebrew/bin/openscad' });
     expect(config.logging.level).toBe('debug');
+  });
+
+  it('layers a partial roles override on the role defaults and rejects an unknown role', () => {
+    const config = parseConfig({ owner: { telegram_user_id: 1 }, roles: { implementer: { retries: 0 } } });
+    expect(config.roles.implementer).toEqual({ timeout_ms: 2_700_000, retries: 0, max_turns: 150 });
+    expect(config.roles.triage.retries).toBe(2);
+    expect(issuesOf(() => parseConfig({ owner: { telegram_user_id: 1 }, roles: { reviewer: {} } }))).toEqual([
+      'roles.reviewer',
+    ]);
   });
 
   it('names owner.telegram_user_id when the owner id is missing', () => {
