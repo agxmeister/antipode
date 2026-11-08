@@ -2,7 +2,7 @@
 title: 'Coordinator core'
 type: 'feature'
 created: '2026-11-08'
-status: 'in-review'
+status: 'done'
 baseline_commit: '2282b4446e4c6387fc4c4623027f0f1ba20b6405'
 route: 'dispatch'
 review_loop_iteration: 0
@@ -85,10 +85,41 @@ context:
 - Recovery marks the pending launch effects of a Stage `done` before failing it, and the daemon attaches the executor's commit hook only after `recover`, so an orphaned launch can never run.
 - `Deadlines.tick` detects sleep as a wall-clock gap between ticks over 60 s and shifts deadlines by the monotonic advance during that gap (equal to the gap if the platform's monotonic clock runs through sleep, nil if it stops). Either way no deadline fires because of the sleep; drift-only detection would miss a platform whose monotonic clock keeps running.
 - The `effects` queue is ordered by `effect_id`; `ulid()` is monotonic within the process so ids sort in minting order.
+- Review pass 1 applied 11 patches (see Review Triage Log): `BootOptions.clock` and `Daemon.tick()` for testing the sleep wiring; `Coordinator.idle()` and `EffectExecutor.settle()` so `stop()` never starts a fresh drain; try/catch around deadline callbacks; `undo_expired` is `ignored(invalid)` while the window is open or unset; `stage_started` needs a `starting` Stage; `stage_retries_exhausted` needs the current Stage live or `failed` (the derived event arrives after its row is settled); creation inputs are parsed through the domain schemas before insert.
 
 ## Spec Change Log
 
 ## Review Triage Log
+
+Pass 1 (blind hunter BH, edge-case hunter ECH, verification gap VG):
+
+| # | Source | Finding | Verdict | Evidence | Route |
+|---|--------|---------|---------|----------|-------|
+| 1 | VG | Daemon post-commit drain hook is never observed; the daemon test drains by hand | medium | Deleting the `onEffectsCommitted` line in `daemon.ts` keeps every test green; in production effects would sit `pending` until stop or next boot | patch |
+| 2 | VG | Sleep tick → `backOnline` wiring in the daemon has no test | medium | Only the two halves are unit-tested; inverting the `sleep` check stays green | patch |
+| 3 | VG | Recovery's retirement of `run_test_step` launches is untested | medium | Dropping the `run_test_step` branch in `recovery.ts` passes all five recovery tests | patch |
+| 4 | VG | `started_at` on `stage_started` is never asserted | low | Replacing the ternary with `ended_at` only still passes; direct one-line assertion | patch |
+| 5 | VG/BH/ECH | `stop()` runs a full fresh drain (would launch Stages at SIGTERM once handlers exist) and never waits for the Coordinator queue, so a queued transaction can hit a closed database | medium | `drain()` starts a new pass when none is in flight; `#tail` is never awaited in `stop()` | patch |
+| 6 | BH | Recovery replays only `pending` effects while AD-18 says every row not `done` | low | Frozen matrix row says `effects pending`; the spec narrowed the spine. Owner decision, settled through correct-course if the spine wording is meant literally | defer |
+| 7 | BH/ECH | A throwing deadline `onFire` escapes `Deadlines.tick` and the bare `setInterval`, crashing the daemon | medium | No try/catch at either level; no callbacks exist yet but 1-3 and 1-7 add them | patch |
+| 8 | BH/ECH | `undo_expired` has no window guard, so an early or duplicate event integrates or cancels while the Owner can still undo | medium | `undone` is guarded by `undoStillOpen`; the mirror check is absent | patch |
+| 9 | BH/ECH | One unparseable `effects` payload makes `pendingEffects()` throw and wedges drain and recovery | low | Real, but reachable only by hand edits or running older code on a newer row; the fix adds a per-row failure branch | reject |
+| 10 | BH | `intake.retries` and `roles.intake.retries` are two keys for one value | false | config-defaults.md defines both: Intake conversation retries (`👀` → `❌`) versus Stage retries | reject |
+| 11 | BH/ECH | `resume` or `undone` into `in_review` increments `review_round` without a new Review | maybe-false | AD-16 says "exactly on each entry to `in_review`" and AD-10 retires the keyboard on each entry, so the literal spine agrees with the code; if the Owner means a round per Review delivery this is medium | defer |
+| 12 | ECH | Pause, cancel or amendment during `integrating`/`merged` leaves the pending `integrate`/`run_release` running, and `resume` queues a second one | medium | `enter('integrating')` always pushes `integrate`; the spine has no cancel for Integration. The fix is the 1-12 handler re-checking Task state and effect idempotency, or a new effect; not a trivial patch | defer |
+| 13 | BH | `back_online` goes to every Project with an ACTIVE Task, not only affected ones | false | Frozen Decisions say "one `back_online` effect per Project with an `ACTIVE` Task" | reject |
+| 14 | BH | `tasks.state` and `resume_state` lack a CHECK constraint | low | zod validates on read; migration 0002 is committed (AD-23) so the fix is a new migration for no user-visible gain | reject |
+| 15 | BH/ECH | `ulid()` stamps `Date.now()` rather than the Clock; a wall-clock step back can break id order | low | Ordering only matters within one process where the counter keeps ids monotonic; no everyday harm | reject |
+| 16 | BH | `stage_retries_exhausted` is accepted from a Stage state whose Stage is no longer live | low | AD-3 says "whose current Stage is running"; one condition fixes it | patch |
+| 17 | BH | Spec status `in-review` while sprint-status says `in-progress` | false | Sprint sync to `review`/`done` happens in step-05 by design | reject |
+| 18 | BH | Dead exports: `GENERIC_EVENT_TYPES`, `EFFECT_KINDS`, `sequentialIds`, `advanceMonotonic` | low | No consumer in `src/` or `test/`; deletion is direct | patch |
+| 19 | BH | Test gaps: `ProjectNotFoundError`, `notify()` error path, IMMEDIATE transaction, tick cleared on stop | low | `ProjectNotFoundError` test is direct and added; the other three need plumbing for rare paths | patch (first only) |
+| 20 | BH | `#update` and `IN (...)` queries prepare a statement per call | low | Milliseconds at this scale; no user-visible effect | reject |
+| 21 | ECH | `stage_started` for a Stage already `running` overwrites `started_at` | low | Duplicate event from an adapter bug; one status check fixes it | patch |
+| 22 | ECH | A hung handler blocks the executor forever | low | Handlers arrive in later stories with their own timeouts (AD-4); executor-level bound is their call | reject |
+| 23 | ECH | `createTask` with `budget_limit <= 0` or `createProject` with an empty name inserts a row that fails zod on every read | low | Inputs unchecked; parsing through the domain schema before insert is one line each | patch |
+| 24 | ECH | Sleep shift includes the awake tick interval and wake latency | low | At most about one second on a sleep of a minute or more | reject |
+| 25 | ECH | Sleep is detected by wall gap between ticks, not by wall−monotonic drift as the task text says; a 61 s event-loop stall counts as sleep | low | True. On Node 24 the monotonic clock runs through sleep (libuv uses continuous time), so drift never grows and the drift trigger would miss every real sleep; the matrix's expected behaviour holds under both. Surfaced to the Owner in the walkthrough | reject |
 
 ## Design Notes
 

@@ -6,6 +6,7 @@ import { Deadlines } from '../core/coordinator/deadlines.ts';
 import { EffectExecutor } from '../core/coordinator/effects.ts';
 import { recover } from '../core/coordinator/recovery.ts';
 import { AntipodError } from '../core/domain/errors.ts';
+import type { Clock } from '../core/ports/clock.ts';
 import { systemClock } from './clock.ts';
 import { loadConfig, type Config } from './config.ts';
 import { ensureHome, resolveHome, type HomePaths } from './home.ts';
@@ -34,12 +35,16 @@ export interface Daemon {
   config(): Config;
   /** Re-reads `config.yaml`; keeps the previous config when it is invalid. Returns whether it applied. */
   reload(): boolean;
-  /** Stops the deadline tick, lets the executor settle, closes the database and the log stream. Idempotent. */
+  /** Stops the deadline tick, waits for in-flight work, closes the database and the log stream. Idempotent. */
   stop(reason: string): Promise<void>;
+  /** One deadline tick, as the interval runs it; exposed for tests. */
+  tick(): void;
 }
 
 export interface BootOptions {
   env?: NodeJS.ProcessEnv;
+  /** Time source for the Coordinator, executor and deadlines; tests pass a fake. */
+  clock?: Clock;
 }
 
 function errorFields(error: unknown): Record<string, unknown> {
@@ -66,6 +71,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   }
   const { logger } = appLogger;
 
+  const clock = options.clock ?? systemClock;
   let config: Config;
   let db: SqliteDatabase | undefined;
   let store: SqliteStore;
@@ -82,17 +88,17 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     store = new SqliteStore(db);
     coordinator = new Coordinator({
       store,
-      clock: systemClock,
+      clock,
       log: logger,
       policy: () => ({ limits: config.limits, roles: config.roles }),
     });
-    executor = new EffectExecutor(store, systemClock, logger);
+    executor = new EffectExecutor(store, clock, logger);
     executor.register('back_online', (effect) => {
       // The silent Telegram notice is a later handler; for now the gap is on record.
       logger.info({ event: 'back_online', project_id: effect.project_id, gap_ms: effect.gap_ms }, 'back_online');
     });
-    deadlines = new Deadlines(systemClock);
-    const recovery = await recover({ store, coordinator, executor, clock: systemClock, log: logger });
+    deadlines = new Deadlines(clock, undefined, logger);
+    const recovery = await recover({ store, coordinator, executor, clock, log: logger });
     // Attached after recovery so nothing drains until recovery has settled the orphaned launches.
     coordinator.onEffectsCommitted(() => executor.notify());
 
@@ -118,16 +124,21 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   }
 
   const openDb = db;
-  const tick = setInterval(() => {
-    const result = deadlines.tick();
-    if (result.sleep !== undefined) {
-      const { gapMs } = result.sleep;
-      logger.info({ event: 'sleep_detected', gap_ms: gapMs }, 'sleep_detected');
-      coordinator.backOnline(gapMs).catch((error: unknown) => {
-        logger.error({ event: 'back_online_failed', ...errorFields(error) }, 'back_online_failed');
-      });
+  const onTick = (): void => {
+    try {
+      const result = deadlines.tick();
+      if (result.sleep !== undefined) {
+        const { gapMs } = result.sleep;
+        logger.info({ event: 'sleep_detected', gap_ms: gapMs }, 'sleep_detected');
+        coordinator.backOnline(gapMs).catch((error: unknown) => {
+          logger.error({ event: 'back_online_failed', ...errorFields(error) }, 'back_online_failed');
+        });
+      }
+    } catch (error) {
+      logger.error({ event: 'deadline_tick_failed', ...errorFields(error) }, 'deadline_tick_failed');
     }
-  }, DEADLINE_TICK_MS);
+  };
+  const tick = setInterval(onTick, DEADLINE_TICK_MS);
   let stopped: Promise<void> | undefined;
   return {
     paths,
@@ -137,6 +148,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     coordinator,
     executor,
     deadlines,
+    tick: onTick,
     config: () => config,
     reload() {
       try {
@@ -154,8 +166,10 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     stop(reason) {
       stopped ??= (async () => {
         clearInterval(tick);
-        // Let an in-flight drain settle its rows before the database closes; pending rows replay at next boot.
-        await executor.drain();
+        // Let queued transactions and the drain in flight finish before the database closes; nothing new
+        // starts, and pending effects replay at next boot (AD-18).
+        await coordinator.idle();
+        await executor.settle();
         logger.info({ event: 'daemon_stopped', reason }, 'daemon_stopped');
         try {
           openDb.close();

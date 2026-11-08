@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { Coordinator, TaskNotFoundError, type CoordinatorPolicy } from '../../../src/core/coordinator/coordinator.ts';
+import { Coordinator, ProjectNotFoundError, TaskNotFoundError, type CoordinatorPolicy } from '../../../src/core/coordinator/coordinator.ts';
 import { ULID_PATTERN } from '../../../src/core/domain/ids.ts';
 import { fakeClock } from '../../helpers/clock.ts';
 import { openTestStore, type TestStore } from '../../helpers/store.ts';
@@ -33,6 +33,7 @@ async function toImplementing(c: Awaited<ReturnType<typeof setup>>) {
   await c.coordinator.applyEvent(c.task.id, { type: 'scheduler_start' });
   const task = c.store.getTask(c.task.id)!;
   await c.coordinator.applyEvent(task.id, { type: 'stage_started', stage_id: task.current_stage_id! });
+  expect(c.store.getStage(task.current_stage_id!)).toMatchObject({ status: 'running', started_at: c.clock.now().toISOString(), ended_at: null });
   return c.store.getTask(task.id)!;
 }
 
@@ -44,6 +45,15 @@ describe('Coordinator (AD-3)', () => {
     expect(c.store.stageEventsOfTask(c.task.id)).toMatchObject([{ event_type: 'new_draft', status: 'applied', from_state: null, to_state: 'draft' }]);
     const bootstrap = await c.coordinator.createTask({ project_id: c.project.id, kind: 'bootstrap', budget_limit: 3 });
     expect(bootstrap).toMatchObject({ state: 'queued', task_no: 1, budget_limit: 3 });
+  });
+
+  it('createTask rejects an unknown Project and an invalid budget without inserting', async () => {
+    const c = await setup();
+    await expect(c.coordinator.createTask({ project_id: 'nope', kind: 'feature' })).rejects.toThrow(ProjectNotFoundError);
+    await expect(c.coordinator.createTask({ project_id: c.project.id, kind: 'feature', budget_limit: 0 })).rejects.toThrow();
+    await expect(c.coordinator.createProject('')).rejects.toThrow();
+    expect(c.store.tasksInStates(['draft'])).toHaveLength(1);
+    expect(c.store.listProjects()).toHaveLength(1);
   });
 
   it('queued + scheduler_start: state, budget, Stage row, event row and start_stage effect in one transaction', async () => {
@@ -165,6 +175,8 @@ describe('Coordinator (AD-3)', () => {
     const bootstrap = await c.coordinator.createTask({ project_id: c.project.id, kind: 'bootstrap' });
     c.store.updateTask(bootstrap.id, { state: 'in_review', updated_at: c.clock.now().toISOString() });
     await c.coordinator.applyEvent(bootstrap.id, { type: 'accepted' });
+    expect(await c.coordinator.applyEvent(bootstrap.id, { type: 'undo_expired' })).toEqual({ applied: false, ignored: 'invalid' }); // window still open
+    c.clock.advance(10_001);
     await c.coordinator.applyEvent(bootstrap.id, { type: 'undo_expired' });
     expect(c.store.getTask(bootstrap.id)!.state).toBe('released');
   });

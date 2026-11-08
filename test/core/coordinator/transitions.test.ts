@@ -132,8 +132,16 @@ for (const state of TASK_STATES) {
 describe('transitions table (AD-3)', () => {
   const pairs = TASK_STATES.flatMap((state) => EVENT_TYPES.map((type) => [state, type] as const));
 
+  /** The fixture each event needs to show its arrow: a `starting` Stage for `stage_started`, a closed window for `undo_expired`. */
+  function fixture(state: TaskState, type: EventType) {
+    if (type === 'stage_started') return { task: task(state), stage: stage(state, { status: 'starting', started_at: null }) };
+    if (type === 'undo_expired') return { task: task(state, { undo_expires_at: new Date(NOW.getTime() - 1).toISOString() }), stage: stage(state) };
+    return { task: task(state), stage: stage(state) };
+  }
+
   it.each(pairs)('%s + %s', (state, type) => {
-    const outcome = transition(task(state), stage(state), sample(type), ctx());
+    const f = fixture(state, type);
+    const outcome = transition(f.task, f.stage, sample(type), ctx());
     const expected = EXPECTED[state][type];
     if (expected === undefined) {
       expect(outcome).toEqual({ ignored: 'invalid' });
@@ -166,10 +174,11 @@ describe('stale Stage events', () => {
     });
   });
 
-  it('a starting Stage is live', () => {
+  it('stage_started moves a starting Stage to running; for a Stage already running it is invalid', () => {
     const outcome = applied(transition(task('implementing'), stage('implementing', { status: 'starting' }), sample('stage_started'), ctx()));
     expect(outcome.next).toBe('implementing');
     expect(outcome.stageUpdate).toEqual({ status: 'running', reason: null });
+    expect(transition(task('implementing'), stage('implementing', { status: 'running' }), sample('stage_started'), ctx())).toEqual({ ignored: 'invalid' });
   });
 });
 
@@ -279,6 +288,17 @@ describe('Stage retries (AD-4)', () => {
     expect(outcome.stageUpdate).toEqual({ status: 'cancelled', reason: 'stage_retries_exhausted' });
   });
 
+  it('stage_retries_exhausted needs the current Stage live or just failed; a cancelled or succeeded one is invalid', () => {
+    const justFailed = applied(transition(task('implementing'), stage('implementing', { status: 'failed', reason: 'crash' }), { type: 'stage_retries_exhausted', reason: 'r' }, ctx()));
+    expect(justFailed.next).toBe('stuck');
+    expect(justFailed.stageUpdate).toBeUndefined();
+    for (const status of ['cancelled', 'succeeded'] as const) {
+      expect(transition(task('implementing'), stage('implementing', { status }), { type: 'stage_retries_exhausted' }, ctx())).toEqual({ ignored: 'invalid' });
+    }
+    expect(transition(task('implementing', { current_stage_id: null }), undefined, { type: 'stage_retries_exhausted' }, ctx())).toEqual({ ignored: 'invalid' });
+    expect(transition(task('implementing'), stage('implementing', { id: 'other' }), { type: 'stage_retries_exhausted' }, ctx())).toEqual({ ignored: 'invalid' });
+  });
+
   it('a role without a config entry gets the default retries', () => {
     const retries = ctx({ retriesFor: (role) => (role === 'test' ? DEFAULT_STAGE_RETRIES : 0) });
     const outcome = applied(transition(task('testing'), stage('testing', { attempt: 2 }), { type: 'stage_failed', stage_id: CURRENT, reason: 'capability_busy' }, retries));
@@ -338,12 +358,19 @@ describe('undo windows (AD-3)', () => {
     expect(applied(transition(expired, undefined, sample('undo_expired'), ctx())).next).toBe('integrating');
   });
 
+  it('undo_expired while the window is still open, or with no window, is invalid', () => {
+    expect(transition(task('accept_pending', { current_stage_id: null }), undefined, sample('undo_expired'), ctx())).toEqual({ ignored: 'invalid' });
+    expect(transition(task('discard_pending', { current_stage_id: null }), undefined, sample('undo_expired'), ctx())).toEqual({ ignored: 'invalid' });
+    expect(transition(task('accept_pending', { current_stage_id: null, undo_expires_at: null }), undefined, sample('undo_expired'), ctx())).toEqual({ ignored: 'invalid' });
+  });
+
   it('undo_expired integrates a feature Task and releases a bootstrap Task', () => {
-    const feature = applied(transition(task('accept_pending', { current_stage_id: null }), undefined, sample('undo_expired'), ctx()));
+    const closed = new Date(NOW.getTime() - 1).toISOString();
+    const feature = applied(transition(task('accept_pending', { current_stage_id: null, undo_expires_at: closed }), undefined, sample('undo_expired'), ctx()));
     expect(feature.next).toBe('integrating');
     expect(feature.effects).toEqual([{ kind: 'integrate', task_id: 'task-1' }]);
 
-    const bootstrap = applied(transition(task('accept_pending', { current_stage_id: null, kind: 'bootstrap' }), undefined, sample('undo_expired'), ctx()));
+    const bootstrap = applied(transition(task('accept_pending', { current_stage_id: null, kind: 'bootstrap', undo_expires_at: closed }), undefined, sample('undo_expired'), ctx()));
     expect(bootstrap.next).toBe('released');
     expect(bootstrap.effects).toEqual([]);
   });

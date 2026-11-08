@@ -5,8 +5,6 @@ export interface FakeClock extends Clock {
   advance(ms: number): void;
   /** Advances only the wall clock, as a sleeping Mac whose monotonic clock stops does. */
   jumpWall(ms: number): void;
-  /** Advances only the monotonic clock. */
-  advanceMonotonic(ms: number): void;
 }
 
 export function fakeClock(start = Date.UTC(2026, 10, 8, 12, 0, 0)): FakeClock {
@@ -22,14 +20,6 @@ export function fakeClock(start = Date.UTC(2026, 10, 8, 12, 0, 0)): FakeClock {
     jumpWall(ms) {
       wall += ms;
     },
-    advanceMonotonic(ms) {
-      mono += ms;
-    },
   };
 }
 
-/** Deterministic ids: `id-0001`, `id-0002`, … */
-export function sequentialIds(prefix = 'id'): () => string {
-  let n = 0;
-  return () => `${prefix}-${String(++n).padStart(4, '0')}`;
-}

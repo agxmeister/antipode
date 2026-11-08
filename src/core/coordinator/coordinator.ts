@@ -5,7 +5,7 @@ import { ulid } from '../domain/ids.ts';
 import type { Clock } from '../ports/clock.ts';
 import { silentLog, type Log } from '../ports/log.ts';
 import type { Store } from '../ports/store.ts';
-import type { Project, Task, TaskKind, TaskState } from '../domain/task.ts';
+import { projectSchema, taskSchema, type Project, type Task, type TaskKind, type TaskState } from '../domain/task.ts';
 import { DEFAULT_STAGE_RETRIES, transition, type TransitionContext } from './transitions.ts';
 
 /** The configurable part of the FSM, read on every event so a SIGHUP reload applies at once. */
@@ -74,6 +74,11 @@ export class Coordinator {
     this.#onEffectsCommitted = hook;
   }
 
+  /** Resolves once every call queued so far has settled; nothing is left to run against the store. */
+  idle(): Promise<void> {
+    return this.#tail.then(() => undefined);
+  }
+
   /** Runs `fn` after everything queued before it; the queue never stalls on a failure. */
   #enqueue<T>(fn: () => T): Promise<T> {
     const run = this.#tail.then(fn, fn);
@@ -88,7 +93,7 @@ export class Coordinator {
   createProject(name: string): Promise<Project> {
     return this.#enqueue(() =>
       this.#store.transaction(() => {
-        const project: Project = { id: this.#newId(), name, paused_at: null, created_at: this.#now() };
+        const project = projectSchema.parse({ id: this.#newId(), name, paused_at: null, created_at: this.#now() });
         this.#store.insertProject(project);
         return project;
       }),
@@ -105,7 +110,7 @@ export class Coordinator {
         const now = this.#now();
         const bootstrap = input.kind === 'bootstrap';
         const creation: CreationEventType = bootstrap ? 'bootstrap_created' : 'new_draft';
-        const task: Task = {
+        const task: Task = taskSchema.parse({
           id: this.#newId(),
           project_id: input.project_id,
           kind: input.kind,
@@ -122,7 +127,7 @@ export class Coordinator {
           config_sha: input.config_sha ?? null,
           created_at: now,
           updated_at: now,
-        };
+        });
         this.#store.insertTask(task);
         this.#store.appendStageEvent({
           id: this.#newId(),

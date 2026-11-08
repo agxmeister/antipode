@@ -1,6 +1,6 @@
 import type { Effect } from '../domain/effects.ts';
 import { isStageEvent, type Event, type EventOf, type EventType, type IgnoreReason } from '../domain/events.ts';
-import { isLiveStage, type Stage, type StageStatus } from '../domain/stage.ts';
+import { isLiveStage, LIVE_STAGE_STATUSES, type Stage, type StageStatus } from '../domain/stage.ts';
 import { ACTIVE_STATES, TERMINAL_STATES, type Task, type TaskPatch, type TaskState } from '../domain/task.ts';
 
 /** What `transition` needs from the outside world, so the function itself stays pure. */
@@ -67,17 +67,6 @@ export const COUNTING_CAUSES: ReadonlySet<EventType> = new Set<EventType>([
   'test_failed',
   'rebase_or_revalidation_failed',
 ]);
-
-export const GENERIC_EVENT_TYPES: readonly EventType[] = [
-  'cancel',
-  'pause',
-  'resume',
-  'amended',
-  'stage_retries_exhausted',
-  'deps_unsatisfiable',
-  'stage_started',
-  'stage_failed',
-];
 
 export function isStageState(state: TaskState): boolean {
   return STAGE_ROLES[state] !== undefined;
@@ -274,13 +263,15 @@ function generic(task: Task, stage: Stage | undefined, event: Event, ctx: Transi
         ? enter('stuck', task, stage, ctx, { cause: event.type, patch: { stuck_reason: event.reason } })
         : { ignored: 'invalid' };
     case 'stage_retries_exhausted': {
-      if (!isStageState(task.state)) return { ignored: 'invalid' };
-      const role = stage?.role ?? STAGE_ROLES[task.state] ?? 'stage';
-      const reason = event.reason ?? `${role} Stage exhausted its retries`;
+      // AD-3: from any state whose current Stage is running. The Stage may already be `failed` when this
+      // is the derived event of its final `stage_failed`, applied after that row was settled.
+      if (!isStageState(task.state) || stage === undefined || stage.id !== task.current_stage_id) return { ignored: 'invalid' };
+      if (!LIVE_STAGE_STATUSES.includes(stage.status) && stage.status !== 'failed') return { ignored: 'invalid' };
+      const reason = event.reason ?? `${stage.role} Stage exhausted its retries`;
       return enter('stuck', task, stage, ctx, { cause: event.type, patch: { stuck_reason: reason } });
     }
     case 'stage_started':
-      return isStageState(task.state)
+      return isStageState(task.state) && stage?.status === 'starting'
         ? { next: task.state, patch: {}, effects: [], stageUpdate: { status: 'running', reason: null }, derived: [] }
         : { ignored: 'invalid' };
     case 'stage_failed': {
@@ -313,7 +304,11 @@ export function transition(task: Task, stage: Stage | undefined, event: Event, c
   if (handled !== undefined) {
     return handled;
   }
+  // Undo windows: `undone` only while the window is open, `undo_expired` only once it has closed.
   if (event.type === 'undone' && !undoStillOpen(task, ctx)) {
+    return { ignored: 'invalid' };
+  }
+  if (event.type === 'undo_expired' && (task.undo_expires_at === null || undoStillOpen(task, ctx))) {
     return { ignored: 'invalid' };
   }
   const rule = (TABLE[task.state] as { [E in EventType]?: Rule<E> } | undefined)?.[event.type] as Rule | undefined;

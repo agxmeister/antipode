@@ -1,11 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { bootDaemon, runDaemon } from '../../src/app/daemon.ts';
 import { AntipodError } from '../../src/core/domain/errors.ts';
 import { migrations } from '../../src/adapters/sqlite/migrations/index.ts';
+import { fakeClock } from '../helpers/clock.ts';
 import { createTempHome, readLogLines, type TempHome } from '../helpers/home.ts';
 
 function logOf(home: TempHome): Array<Record<string, unknown>> {
@@ -59,13 +60,34 @@ describe('daemon', () => {
     const task = await daemon.coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
     expect(task.budget_limit).toBe(daemon.config().limits.iteration_budget);
     await daemon.coordinator.applyEvent(task.id, { type: 'scheduler_start' });
-    await daemon.executor.drain();
     expect(daemon.store.getTask(task.id)).toMatchObject({ state: 'implementing', budget_used: 1 });
-    // No start_stage handler yet (story 1-4): the effect fails no_handler and is logged, never left pending.
+    // The commit hook drains without anyone calling drain(). No start_stage handler yet (story 1-4):
+    // the effect fails no_handler and is logged, never left pending.
+    await vi.waitFor(() => expect(daemon.store.effectsOfTask(task.id)[0]?.status).not.toBe('pending'));
     expect(daemon.store.effectsOfTask(task.id)).toMatchObject([{ kind: 'start_stage', status: 'failed', error: 'no_handler' }]);
     expect(daemon.executor.has('back_online')).toBe(true);
     await daemon.stop('test');
     expect(logOf(home).find((line) => line['event'] === 'effect_failed')).toMatchObject({ level: 50, error: 'no_handler' });
+  });
+
+  it('a sleep seen by the deadline tick queues back_online for every Project with an ACTIVE Task', async () => {
+    const home = createTempHome();
+    const clock = fakeClock();
+    const daemon = await bootDaemon({ env: home.env, clock });
+    const busy = await daemon.coordinator.createProject('busy');
+    await daemon.coordinator.createTask({ project_id: busy.id, kind: 'bootstrap' });
+    const idle = await daemon.coordinator.createProject('idle');
+    await daemon.coordinator.createTask({ project_id: idle.id, kind: 'feature' });
+    daemon.tick();
+    clock.jumpWall(2 * 3_600_000);
+    daemon.tick();
+    await vi.waitFor(() => expect(daemon.store.pendingEffects().length + logOf(home).filter((l) => l['event'] === 'back_online').length).toBeGreaterThan(0));
+    await daemon.coordinator.idle();
+    await daemon.executor.settle();
+    await daemon.stop('test');
+    const lines = logOf(home);
+    expect(lines.find((l) => l['event'] === 'sleep_detected')).toMatchObject({ gap_ms: 7_200_000 });
+    expect(lines.filter((l) => l['event'] === 'back_online')).toMatchObject([{ project_id: busy.id, gap_ms: 7_200_000 }]);
   });
 
   it.each([

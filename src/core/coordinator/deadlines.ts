@@ -1,4 +1,5 @@
 import type { Clock } from '../ports/clock.ts';
+import { silentLog, type Log } from '../ports/log.ts';
 
 export interface TickResult {
   /** Deadline ids fired by this tick, in due order. */
@@ -26,12 +27,14 @@ interface Entry {
 export class Deadlines {
   readonly #clock: Clock;
   readonly #threshold: number;
+  readonly #log: Log;
   readonly #entries = new Map<string, Entry>();
   #last: { mono: number; wall: number } | undefined;
 
-  constructor(clock: Clock, sleepThresholdMs: number = SLEEP_THRESHOLD_MS) {
+  constructor(clock: Clock, sleepThresholdMs: number = SLEEP_THRESHOLD_MS, log: Log = silentLog) {
     this.#clock = clock;
     this.#threshold = sleepThresholdMs;
+    this.#log = log;
   }
 
   /** Arms (or re-arms) deadline `id` to fire `dueInMs` from now. */
@@ -80,7 +83,13 @@ export class Deadlines {
     for (const [id, entry] of due) {
       this.#entries.delete(id);
       result.fired.push(id);
-      entry.onFire(id);
+      try {
+        entry.onFire(id);
+      } catch (error) {
+        // One bad callback never stops the other deadlines or the tick.
+        const message = error instanceof Error ? error.message : String(error);
+        this.#log.error({ event: 'deadline_callback_failed', deadline_id: id, error: message }, 'deadline_callback_failed');
+      }
     }
     return result;
   }

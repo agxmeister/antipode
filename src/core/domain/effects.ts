@@ -33,10 +33,6 @@ export type Effect = z.infer<typeof effectSchema>;
 export type EffectKind = Effect['kind'];
 export type EffectOf<K extends EffectKind> = Extract<Effect, { kind: K }>;
 
-export const EFFECT_KINDS: readonly EffectKind[] = effectSchema.options.map(
-  (option) => option.shape.kind.value as EffectKind,
-);
-
 export const effectStatusSchema = z.enum(['pending', 'done', 'failed']);
 export type EffectStatus = z.infer<typeof effectStatusSchema>;
 

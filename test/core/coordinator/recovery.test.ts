@@ -126,6 +126,44 @@ describe('boot recovery (AD-18)', () => {
     expect(ts.store.pendingEffects()).toEqual([]);
   });
 
+  it('a crash in testing: the pending run_test_step of the dead attempt is retired and only attempt 2 runs', async () => {
+    const first = openTestStore();
+    open.push(first);
+    const clock = fakeClock();
+    const { coordinator, executor } = boot(first, clock);
+    const project = await coordinator.createProject('p');
+    const task = await coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
+    await coordinator.applyEvent(task.id, { type: 'scheduler_start' });
+    await executor.drain();
+    const implementer = first.store.getTask(task.id)!.current_stage_id!;
+    await coordinator.applyEvent(task.id, { type: 'stage_started', stage_id: implementer });
+    await coordinator.applyEvent(task.id, { type: 'implementer_done', stage_id: implementer });
+    const test1 = first.store.getTask(task.id)!.current_stage_id!;
+    expect(first.store.getStage(test1)).toMatchObject({ role: 'test', attempt: 1, status: 'starting' });
+    expect(first.store.pendingEffects().map((e) => e.kind)).toEqual(['run_test_step']);
+    first.close();
+
+    const second = reopenTestStore(first.file);
+    open.push(second);
+    const { coordinator: c2, executor: e2 } = boot(second, clock);
+    const ran: Effect[] = [];
+    e2.register('run_test_step', (effect) => {
+      ran.push(effect);
+    });
+    const report = await recover({ store: second.store, coordinator: c2, executor: e2, clock });
+
+    const after = second.store.getTask(task.id)!;
+    expect(after.state).toBe('testing');
+    expect(second.store.getStage(test1)).toMatchObject({ status: 'failed', reason: RESTART });
+    expect(second.store.getStage(after.current_stage_id!)).toMatchObject({ role: 'test', attempt: 2, status: 'starting' });
+    expect(ran).toEqual([{ kind: 'run_test_step', stage_id: after.current_stage_id, task_id: task.id, attempt: 2 }]);
+    expect(second.store.effectsOfTask(task.id).filter((e) => e.kind === 'run_test_step').map((e) => [(e.effect as { attempt: number }).attempt, e.status])).toEqual([
+      [1, 'done'],
+      [2, 'done'],
+    ]);
+    expect(report).toEqual({ stages_restarted: 1, effects_orphaned: 1, effects_replayed: 1 });
+  });
+
   it('a live Stage row the Task no longer points at is closed directly', async () => {
     const ts = openTestStore();
     open.push(ts);

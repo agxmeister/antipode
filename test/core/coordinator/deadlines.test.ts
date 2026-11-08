@@ -83,6 +83,22 @@ describe('Deadlines (AD-18)', () => {
     expect(d.deadlines.tick()).toEqual({ fired: ['a'] });
   });
 
+  it('a throwing callback is logged and does not stop the next due deadline from firing', () => {
+    const clock = fakeClock();
+    const errors: Record<string, unknown>[] = [];
+    const deadlines = new Deadlines(clock, SLEEP_THRESHOLD_MS, { debug() {}, info() {}, warn() {}, error: (fields) => errors.push(fields) });
+    const fired: string[] = [];
+    deadlines.set('bad', 1_000, () => {
+      throw new Error('callback exploded');
+    });
+    deadlines.set('good', 2_000, (id) => fired.push(id));
+    clock.advance(3_000);
+    expect(deadlines.tick().fired).toEqual(['bad', 'good']);
+    expect(fired).toEqual(['good']);
+    expect(errors).toEqual([{ event: 'deadline_callback_failed', deadline_id: 'bad', error: 'callback exploded' }]);
+    expect(deadlines.size).toBe(0);
+  });
+
   it('the first tick never reports a sleep', () => {
     const clock = fakeClock();
     const deadlines = new Deadlines(clock);

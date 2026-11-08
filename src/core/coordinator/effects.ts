@@ -42,6 +42,11 @@ export class EffectExecutor {
     });
   }
 
+  /** Waits for the drain in flight, if any; never starts one. For shutdown, where pending rows replay at next boot. */
+  settle(): Promise<void> {
+    return this.#draining ?? Promise.resolve();
+  }
+
   /** Runs every pending effect; resolves when the queue is empty. */
   drain(): Promise<void> {
     if (this.#draining !== undefined) {
