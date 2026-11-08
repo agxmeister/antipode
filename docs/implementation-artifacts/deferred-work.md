@@ -10,8 +10,8 @@
   summary: Revisit `antipod upgrade` ordering (migrate before kickstart) before the first destructive migration; consider stopping the agent first, or a pre-upgrade backup.
   evidence: unverified, medium if true. The old daemon checks the schema only at boot, so a failed kickstart leaves it on a newer schema; AD-23 fixes the order. Settle by checking whether any migration drops or renames columns (review pass 1, #10).
 - source_spec: `docs/implementation-artifacts/spec-1-2-coordinator-core.md`
-  summary: Decide whether boot recovery replays `failed` effects as well as `pending` ones.
-  evidence: Spine AD-18 says "re-executes every `effects` row not `done`"; the story's frozen matrix narrowed it to `pending`, and `recovery.ts` follows the matrix. A `notify` or `integrate` whose handler threw is never retried at boot. Owner decision via correct-course (review pass 1, #6).
+  summary: Run `bmad-correct-course` to amend spine AD-18 from "every `effects` row not `done`" to "every `pending` `effects` row".
+  evidence: Owner decided 2026-11-08 in the story 1-2 walkthrough: boot recovery replays `pending` effects only, and `failed` is terminal, as in AD-3. Stage launches retry through AD-4 and Telegram resends through the `outbox`. `recovery.ts` already behaves this way, so no code change; only the spine wording is open (review pass 1, #6).
 - source_spec: `docs/implementation-artifacts/spec-1-2-coordinator-core.md`
   summary: Confirm that `review_round` should increment on every entry to `in_review`, including `resume` and `undone`.
   evidence: unverified, medium if a round must mean one Review delivery. `enter('in_review')` bumps the round on each entry, matching AD-16 "exactly on each entry" and AD-10 "keyboard retired on each entry"; a pause/resume or Accept-then-Undo therefore retires the live Review card's buttons (review pass 1, #11).
