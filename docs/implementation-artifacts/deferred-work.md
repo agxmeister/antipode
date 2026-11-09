@@ -18,3 +18,9 @@
 - source_spec: `docs/implementation-artifacts/spec-1-2-coordinator-core.md`
   summary: Make Integration and Release effects safe under pause, cancel or amendment: the `integrate`/`run_release` handler must re-check Task state before each step and `resume` must not queue a second one.
   evidence: medium. `pause` from `integrating` (allowed by AD-3) leaves the pending `integrate` effect running and `resume` re-enters `integrating`, pushing another `integrate`. Settle in story 1-12 with a state check in the handler and idempotency per Task, or a new cancel effect (review pass 1, #12).
+- source_spec: `docs/implementation-artifacts/spec-1-2-coordinator-core.md`
+  summary: Decide whether `resume` should keep the Stage's attempt count instead of starting a fresh Stage at attempt 1.
+  evidence: Seen in the story 1-2 walkthrough demo: `enter()` on `resume` starts attempt 1, so pausing and resuming gives a failing Stage a new set of AD-4 retries. Defensible, since AD-4 counts retries per Stage and the Owner chose to resume; undecided by the Owner.
+- source_spec: `docs/implementation-artifacts/spec-1-2-coordinator-core.md`
+  summary: The `start_stage`/`run_test_step` handlers must apply `stage_failed` themselves when a launch throws.
+  evidence: `failed` effects are terminal (Owner decision on #6), so a throwing launch leaves its Stage `starting` and the Task idle until the next boot's recovery. Settle in the story that registers the launch handlers (1-6/1-7).
