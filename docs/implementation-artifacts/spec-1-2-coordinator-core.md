@@ -89,6 +89,8 @@ context:
 
 ## Spec Change Log
 
+- 2026-11-09, `docs/planning-artifacts/sprint-change-proposal-2026-11-09.md` (Owner-approved after the walkthrough): `review_round` increments only on entry to `in_review` from `verifying` (`evidence_verified`); `undone` and `resume` keep the round (review #11). Boot recovery replays `pending` effects only, now matching AD-18 (review #6, no code change).
+
 ## Review Triage Log
 
 Pass 1 (blind hunter BH, edge-case hunter ECH, verification gap VG):

@@ -348,10 +348,11 @@ describe('undo windows (AD-3)', () => {
     expect(outcome.patch.undo_expires_at).toBe('2026-11-08T12:01:00.000Z');
   });
 
-  it('undone before expiry returns to in_review (new round); after expiry it is invalid', () => {
+  it('undone before expiry returns to in_review in the same round; after expiry it is invalid', () => {
     const before = applied(transition(task('accept_pending', { current_stage_id: null, review_round: 2 }), undefined, sample('undone'), ctx()));
     expect(before.next).toBe('in_review');
-    expect(before.patch).toMatchObject({ undo_expires_at: null, review_round: 3 });
+    expect(before.patch).toMatchObject({ undo_expires_at: null });
+    expect(before.patch.review_round).toBeUndefined();
 
     const expired = task('accept_pending', { current_stage_id: null, undo_expires_at: new Date(NOW.getTime() - 1).toISOString() });
     expect(transition(expired, undefined, sample('undone'), ctx())).toEqual({ ignored: 'invalid' });
@@ -377,11 +378,18 @@ describe('undo windows (AD-3)', () => {
 });
 
 describe('other columns', () => {
-  it('review_round increments only on entry to in_review (AD-16)', () => {
+  it('review_round increments once per Review delivered: only on entry to in_review from verifying (AD-16)', () => {
     const verified = applied(transition(task('verifying', { review_round: 1 }), stage('verifying'), sample('evidence_verified'), ctx()));
     expect(verified.patch.review_round).toBe(2);
     const correction = applied(transition(task('in_review', { current_stage_id: null, review_round: 2 }), undefined, sample('correction'), ctx()));
     expect(correction.patch.review_round).toBeUndefined();
+  });
+
+  it('resume into in_review keeps the round (AD-16)', () => {
+    const paused = task('paused', { current_stage_id: null, resume_state: 'in_review', review_round: 2 });
+    const resumed = applied(transition(paused, undefined, sample('resume'), ctx()));
+    expect(resumed.next).toBe('in_review');
+    expect(resumed.patch.review_round).toBeUndefined();
   });
 
   it('approved assigns the per-Project Task number once', () => {

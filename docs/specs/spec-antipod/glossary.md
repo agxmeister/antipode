@@ -44,7 +44,7 @@ Fixed vocabulary for every Antipode artifact. Capitalized terms in SPEC.md, the 
 - **Before/after composite** — one image with labelled BEFORE and AFTER halves; after a Correction the before half is the previous Review's Evidence.
 - **Demo** — Evidence the Owner can try from the phone: an APK, STL or zipped WebGL build sent as a file. Optional. Link Demos are post-MVP.
 - **Review** — the message sequence sent when a Task is reviewable: one Evidence message per criterion, the Demo, then the **Review card** (summary, criteria strip, Parking Lot, cost line, `Accept` / `Request changes`).
-- **Review round** — increments on each entry to in review; the only round number. Callbacks are valid only for the current round.
+- **Review round** — increments once per Review delivered (entry to in review from verifying); a return through Undo or resume keeps the round. The only round number. Callbacks are valid only for the current round.
 - **Review Queue** — Reviews delivered and not yet answered, counted across all Projects for backpressure.
 - **Correction** — the Owner's `Request changes` feedback. Returns the same Task to the Implementer on the same Branch; does not use the budget.
 - **Owner Message** — any free text or voice from the Owner: new Task request, Correction, Stuck reply or contract edit. Always interpreted by Intake into one typed instruction.

@@ -163,7 +163,7 @@ describe('Coordinator (AD-3)', () => {
 
     c.clock.advance(5_000);
     await c.coordinator.applyEvent(task.id, { type: 'undone' });
-    expect(c.store.getTask(task.id)).toMatchObject({ state: 'in_review', review_round: 2, undo_expires_at: null });
+    expect(c.store.getTask(task.id)).toMatchObject({ state: 'in_review', review_round: 1, undo_expires_at: null });
 
     await c.coordinator.applyEvent(task.id, { type: 'accepted' });
     c.clock.advance(10_001);

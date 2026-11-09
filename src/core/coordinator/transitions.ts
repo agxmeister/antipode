@@ -124,7 +124,9 @@ function enter(next: TaskState, task: Task, stage: Stage | undefined, ctx: Trans
 
   switch (next) {
     case 'in_review':
-      patch.review_round = task.review_round + 1;
+      // One round per Review delivered (AD-16): only a fresh Review from `verifying` starts a round;
+      // `undone` and `resume` return to the same Review and keep it.
+      if (opts.cause === 'evidence_verified') patch.review_round = task.review_round + 1;
       break;
     case 'accept_pending':
       patch.undo_expires_at = new Date(ctx.now.getTime() + ctx.limits.undo_accept_ms).toISOString();
