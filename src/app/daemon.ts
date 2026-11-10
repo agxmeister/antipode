@@ -5,8 +5,10 @@ import { Coordinator } from '../core/coordinator/coordinator.ts';
 import { Deadlines } from '../core/coordinator/deadlines.ts';
 import { EffectExecutor } from '../core/coordinator/effects.ts';
 import { recover } from '../core/coordinator/recovery.ts';
+import { Scheduler } from '../core/coordinator/scheduler.ts';
 import { AntipodError } from '../core/domain/errors.ts';
 import type { Clock } from '../core/ports/clock.ts';
+import type { WindowReader } from '../core/ports/window-reader.ts';
 import { systemClock } from './clock.ts';
 import { loadConfig, type Config } from './config.ts';
 import { ensureHome, resolveHome, type HomePaths } from './home.ts';
@@ -21,7 +23,7 @@ export interface SignalSource {
   off(signal: NodeJS.Signals, listener: () => void): unknown;
 }
 
-/** How often deadlines are checked and sleep is detected (AD-18). */
+/** How often deadlines are checked, sleep is detected (AD-18) and the scheduler ticks (AD-11). */
 export const DEADLINE_TICK_MS = 1000;
 
 export interface Daemon {
@@ -32,20 +34,26 @@ export interface Daemon {
   readonly coordinator: Coordinator;
   readonly executor: EffectExecutor;
   readonly deadlines: Deadlines;
+  readonly scheduler: Scheduler;
   config(): Config;
   /** Re-reads `config.yaml`; keeps the previous config when it is invalid. Returns whether it applied. */
   reload(): boolean;
   /** Stops the deadline tick, waits for in-flight work, closes the database and the log stream. Idempotent. */
   stop(reason: string): Promise<void>;
-  /** One deadline tick, as the interval runs it; exposed for tests. */
-  tick(): void;
+  /** One tick as the interval runs it: deadlines, then the scheduler. Resolves when the scheduler tick ends; never rejects. */
+  tick(): Promise<void>;
 }
 
 export interface BootOptions {
   env?: NodeJS.ProcessEnv;
   /** Time source for the Coordinator, executor and deadlines; tests pass a fake. */
   clock?: Clock;
+  /** Usage-window reader; defaults to one that has no reading (the `anthropic-usage` adapter is story 1-16). */
+  windowReader?: WindowReader;
 }
+
+/** No reading: the usage gate stays open (AD-12 fallback arrives with the estimator). */
+const noWindowReader: WindowReader = { read: async () => null };
 
 function errorFields(error: unknown): Record<string, unknown> {
   if (error instanceof AntipodError) {
@@ -78,6 +86,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   let coordinator: Coordinator;
   let executor: EffectExecutor;
   let deadlines: Deadlines;
+  let scheduler: Scheduler;
   try {
     config = loadConfig(paths.config);
     logger.level = config.logging.level;
@@ -97,7 +106,22 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       // The silent Telegram notice is a later handler; for now the gap is on record.
       logger.info({ event: 'back_online', project_id: effect.project_id, gap_ms: effect.gap_ms }, 'back_online');
     });
+    executor.register('notify', (effect) => {
+      // Telegram templates are later stories; for now the notice is on record.
+      logger.info({ event: 'notice', notice_kind: effect.notice_kind, task_id: effect.task_id, project_id: effect.project_id, payload: effect.payload }, 'notice');
+    });
     deadlines = new Deadlines(clock, undefined, logger);
+    scheduler = new Scheduler({
+      store,
+      coordinator,
+      executor,
+      windowReader: options.windowReader ?? noWindowReader,
+      clock,
+      log: logger,
+      policy: () => ({ limits: config.limits, usage: config.usage }),
+    });
+    // The usage-window launch gate (AD-11); start_stage itself is registered with the claude-cli adapter (story 1-7).
+    executor.setGuard(['start_stage'], scheduler.launchGuard);
     const recovery = await recover({ store, coordinator, executor, clock, log: logger });
     // Attached after recovery so nothing drains until recovery has settled the orphaned launches.
     coordinator.onEffectsCommitted(() => executor.notify());
@@ -124,7 +148,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   }
 
   const openDb = db;
-  const onTick = (): void => {
+  const onTick = (): Promise<void> => {
     try {
       const result = deadlines.tick();
       if (result.sleep !== undefined) {
@@ -137,9 +161,14 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     } catch (error) {
       logger.error({ event: 'deadline_tick_failed', ...errorFields(error) }, 'deadline_tick_failed');
     }
+    if (stopped !== undefined) {
+      return Promise.resolve();
+    }
+    // Never rejects; failures are logged inside the scheduler.
+    return scheduler.tick();
   };
-  const tick = setInterval(onTick, DEADLINE_TICK_MS);
   let stopped: Promise<void> | undefined;
+  const tick = setInterval(() => void onTick(), DEADLINE_TICK_MS);
   return {
     paths,
     logger,
@@ -148,6 +177,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     coordinator,
     executor,
     deadlines,
+    scheduler,
     tick: onTick,
     config: () => config,
     reload() {
@@ -166,6 +196,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     stop(reason) {
       stopped ??= (async () => {
         clearInterval(tick);
+        await scheduler.idle();
         // Let queued transactions and the drain in flight finish before the database closes; nothing new
         // starts, and pending effects replay at next boot (AD-18).
         await coordinator.idle();

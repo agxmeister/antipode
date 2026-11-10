@@ -5,7 +5,7 @@ import { ulid } from '../domain/ids.ts';
 import type { Clock } from '../ports/clock.ts';
 import { silentLog, type Log } from '../ports/log.ts';
 import type { Store } from '../ports/store.ts';
-import { projectSchema, taskSchema, type Project, type Task, type TaskKind, type TaskState } from '../domain/task.ts';
+import { projectSchema, taskSchema, waitingReasonSchema, type Project, type Task, type TaskKind, type TaskState, type WaitingReason } from '../domain/task.ts';
 import { DEFAULT_STAGE_RETRIES, transition, type TransitionContext } from './transitions.ts';
 
 /** The configurable part of the FSM, read on every event so a SIGHUP reload applies at once. */
@@ -154,6 +154,51 @@ export class Coordinator {
         this.#onEffectsCommitted();
       }
       return result;
+    });
+  }
+
+  /**
+   * Stores the failing scheduler gate as `tasks.waiting_reason` (AD-11). Not an event: no
+   * `stage_events` row, and nothing is written when the value is unchanged. Resolves whether it wrote.
+   */
+  setWaitingReason(taskId: string, reason: WaitingReason | null): Promise<boolean> {
+    const value = reason === null ? null : waitingReasonSchema.parse(reason);
+    return this.#enqueue(() =>
+      this.#store.transaction(() => {
+        const task = this.#store.getTask(taskId);
+        if (task === undefined) {
+          throw new TaskNotFoundError(taskId);
+        }
+        if (task.waiting_reason === value) {
+          return false;
+        }
+        this.#store.updateTask(taskId, { waiting_reason: value, updated_at: this.#now() });
+        this.#log.debug({ event: 'waiting_reason_set', task_id: taskId, waiting_reason: value }, 'waiting_reason_set');
+        return true;
+      }),
+    );
+  }
+
+  /**
+   * Queues one `notify` effect of `noticeKind` for a Task unless one with the same `key` already
+   * exists in any status; `key` is stored as `payload.key`. Resolves whether it inserted.
+   */
+  notifyOnce(taskId: string, noticeKind: string, key: string, payload: Record<string, unknown> = {}): Promise<boolean> {
+    return this.#enqueue(() => {
+      const inserted = this.#store.transaction(() => {
+        if (this.#store.getTask(taskId) === undefined) {
+          throw new TaskNotFoundError(taskId);
+        }
+        if (this.#store.latestNotify(taskId, noticeKind, key) !== undefined) {
+          return false;
+        }
+        this.#insertEffect(taskId, { kind: 'notify', notice_kind: noticeKind, task_id: taskId, payload: { ...payload, key } });
+        return true;
+      });
+      if (inserted) {
+        this.#onEffectsCommitted();
+      }
+      return inserted;
     });
   }
 

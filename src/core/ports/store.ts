@@ -23,6 +23,17 @@ export interface Store {
   tasksInStates(states: readonly TaskState[]): Task[];
   /** The next free per-Project Task number (AD-16). */
   nextTaskNo(projectId: string): number;
+  /** Number of Tasks in any of `states`. */
+  countTasksInStates(states: readonly TaskState[]): number;
+  /** `queued` Tasks, oldest first (`created_at`, `id`), the order the scheduler evaluates them (AD-11). */
+  queuedTasks(): Task[];
+  /** Whether the Project has a `bootstrap` Task in `released` (the bootstrap gate, AD-11). */
+  bootstrapReleased(projectId: string): boolean;
+
+  /** Records that `taskId` waits for `dependsOnTaskId` to merge (CAP-15); repeating a pair is a no-op. */
+  insertDependency(taskId: string, dependsOnTaskId: string): void;
+  /** The Tasks `taskId` depends on, oldest first. */
+  dependenciesOf(taskId: string): Task[];
 
   insertStage(stage: Stage): void;
   getStage(id: string): Stage | undefined;
@@ -39,5 +50,10 @@ export interface Store {
   /** Rows still `pending`, in insertion order. */
   pendingEffects(): EffectRow[];
   effectsOfTask(taskId: string): EffectRow[];
+  /**
+   * The newest `notify` effect of `taskId` with `notice_kind`, in any status, whose `payload.key`
+   * equals `key` (any key when omitted). Backs once-only notices.
+   */
+  latestNotify(taskId: string, noticeKind: string, key?: string): EffectRow | undefined;
   markEffect(effectId: string, status: EffectStatus, finishedAt: string, error?: string): void;
 }

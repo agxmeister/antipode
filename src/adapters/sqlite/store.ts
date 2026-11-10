@@ -75,6 +75,12 @@ export class SqliteStore implements Store {
     insertTask: Statement;
     getTask: Statement;
     nextTaskNo: Statement;
+    queuedTasks: Statement;
+    bootstrapReleased: Statement;
+    insertDependency: Statement;
+    dependenciesOf: Statement;
+    latestNotify: Statement;
+    latestNotifyAnyKey: Statement;
     insertStage: Statement;
     getStage: Statement;
     stagesOfTask: Statement;
@@ -100,6 +106,22 @@ export class SqliteStore implements Store {
       insertTask: db.prepare(insertSql('tasks', TASK_COLUMNS)),
       getTask: db.prepare('SELECT * FROM tasks WHERE id = ?'),
       nextTaskNo: db.prepare('SELECT COALESCE(MAX(task_no), 0) + 1 AS next FROM tasks WHERE project_id = ?'),
+      queuedTasks: db.prepare("SELECT * FROM tasks WHERE state = 'queued' ORDER BY created_at, id"),
+      bootstrapReleased: db.prepare("SELECT 1 FROM tasks WHERE project_id = ? AND kind = 'bootstrap' AND state = 'released' LIMIT 1"),
+      insertDependency: db.prepare('INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?) ON CONFLICT DO NOTHING'),
+      dependenciesOf: db.prepare(
+        `SELECT t.* FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on_task_id
+         WHERE d.task_id = ? ORDER BY t.created_at, t.id`,
+      ),
+      latestNotify: db.prepare(
+        `SELECT * FROM effects WHERE task_id = ? AND kind = 'notify'
+         AND json_extract(payload, '$.notice_kind') = ? AND json_extract(payload, '$.payload.key') = ?
+         ORDER BY effect_id DESC LIMIT 1`,
+      ),
+      latestNotifyAnyKey: db.prepare(
+        `SELECT * FROM effects WHERE task_id = ? AND kind = 'notify' AND json_extract(payload, '$.notice_kind') = ?
+         ORDER BY effect_id DESC LIMIT 1`,
+      ),
       insertStage: db.prepare(insertSql('stages', STAGE_COLUMNS)),
       getStage: db.prepare('SELECT * FROM stages WHERE id = ?'),
       stagesOfTask: db.prepare('SELECT * FROM stages WHERE task_id = ? ORDER BY id'),
@@ -165,6 +187,30 @@ export class SqliteStore implements Store {
     return (this.#stmt.nextTaskNo.get(projectId) as { next: number }).next;
   }
 
+  countTasksInStates(states: readonly TaskState[]): number {
+    if (states.length === 0) {
+      return 0;
+    }
+    const row = this.#db.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE state IN (${placeholders(states.length)})`).get(...states) as { n: number };
+    return row.n;
+  }
+
+  queuedTasks(): Task[] {
+    return this.#stmt.queuedTasks.all().map((row) => taskSchema.parse(row));
+  }
+
+  bootstrapReleased(projectId: string): boolean {
+    return this.#stmt.bootstrapReleased.get(projectId) !== undefined;
+  }
+
+  insertDependency(taskId: string, dependsOnTaskId: string): void {
+    this.#stmt.insertDependency.run(taskId, dependsOnTaskId);
+  }
+
+  dependenciesOf(taskId: string): Task[] {
+    return this.#stmt.dependenciesOf.all(taskId).map((row) => taskSchema.parse(row));
+  }
+
   insertStage(stage: Stage): void {
     this.#stmt.insertStage.run(stage);
   }
@@ -224,6 +270,13 @@ export class SqliteStore implements Store {
 
   effectsOfTask(taskId: string): EffectRow[] {
     return (this.#stmt.effectsOfTask.all(taskId) as EffectDbRow[]).map(toEffectRow);
+  }
+
+  latestNotify(taskId: string, noticeKind: string, key?: string): EffectRow | undefined {
+    const row = (
+      key === undefined ? this.#stmt.latestNotifyAnyKey.get(taskId, noticeKind) : this.#stmt.latestNotify.get(taskId, noticeKind, key)
+    ) as EffectDbRow | undefined;
+    return row === undefined ? undefined : toEffectRow(row);
   }
 
   markEffect(effectId: string, status: EffectStatus, finishedAt: string, error?: string): void {

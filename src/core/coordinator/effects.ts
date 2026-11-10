@@ -8,6 +8,12 @@ export type EffectHandler<K extends EffectKind = EffectKind> = (effect: EffectOf
 export const NO_HANDLER = 'no_handler';
 
 /**
+ * Asked before a guarded effect runs. `held` leaves the row `pending` and skips it for the rest of
+ * the current drain; a later `notify` or drain asks again. Used for the usage-window launch gate (AD-11).
+ */
+export type EffectGuard = (row: EffectRow) => 'run' | 'held' | Promise<'run' | 'held'>;
+
+/**
  * Acts second (AD-3): drains `effects` rows in insertion order after the Coordinator commits,
  * marking each `done` or `failed`. Handlers are registered by kind from the composition root;
  * a kind nobody registered fails `no_handler`. One drain runs at a time; a notify during a drain
@@ -18,6 +24,7 @@ export class EffectExecutor {
   readonly #clock: Clock;
   readonly #log: Log;
   readonly #handlers = new Map<EffectKind, EffectHandler>();
+  readonly #guards = new Map<EffectKind, EffectGuard>();
   #draining: Promise<void> | undefined;
   #again = false;
 
@@ -29,6 +36,13 @@ export class EffectExecutor {
 
   register<K extends EffectKind>(kind: K, handler: EffectHandler<K>): void {
     this.#handlers.set(kind, handler as unknown as EffectHandler);
+  }
+
+  /** Puts `guard` in front of every effect of `kinds`; replaces an earlier guard of the same kind. */
+  setGuard(kinds: readonly EffectKind[], guard: EffectGuard): void {
+    for (const kind of kinds) {
+      this.#guards.set(kind, guard);
+    }
   }
 
   has(kind: EffectKind): boolean {
@@ -54,10 +68,15 @@ export class EffectExecutor {
       return this.#draining;
     }
     this.#draining = (async () => {
+      // Rows a guard held in this drain; they stay pending and are not asked about again until the next drain.
+      const held = new Set<string>();
+      // Yield once so `#draining` is set before any guard or handler runs: a synchronous notify() from
+      // one of them must join this drain, not start a nested one.
+      await Promise.resolve();
       try {
         do {
           this.#again = false;
-          await this.#runPending();
+          await this.#runPending(held);
         } while (this.#again);
       } finally {
         this.#draining = undefined;
@@ -66,13 +85,36 @@ export class EffectExecutor {
     return this.#draining;
   }
 
-  async #runPending(): Promise<void> {
+  async #runPending(held: Set<string>): Promise<void> {
     for (const row of this.#store.pendingEffects()) {
+      if (held.has(row.effect_id)) {
+        continue;
+      }
       // Re-read: an earlier pass or recovery may have settled this row meanwhile (idempotent by effect_id).
       if (this.#store.getEffect(row.effect_id)?.status !== 'pending') {
         continue;
       }
+      if ((await this.#guard(row)) === 'held') {
+        held.add(row.effect_id);
+        this.#log.debug({ event: 'effect_held', effect_id: row.effect_id, kind: row.kind, task_id: row.task_id }, 'effect_held');
+        continue;
+      }
       await this.#runOne(row);
+    }
+  }
+
+  /** A guard that throws lets the effect run: a broken gate never blocks the queue. */
+  async #guard(row: EffectRow): Promise<'run' | 'held'> {
+    const guard = this.#guards.get(row.kind);
+    if (guard === undefined) {
+      return 'run';
+    }
+    try {
+      return await guard(row);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.#log.error({ event: 'effect_guard_failed', effect_id: row.effect_id, kind: row.kind, task_id: row.task_id, error: message }, 'effect_guard_failed');
+      return 'run';
     }
   }
 

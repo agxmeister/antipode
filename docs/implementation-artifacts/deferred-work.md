@@ -18,3 +18,6 @@
 - source_spec: `docs/implementation-artifacts/spec-1-2-coordinator-core.md`
   summary: The `start_stage`/`run_test_step` handlers must apply `stage_failed` themselves when a launch throws.
   evidence: `failed` effects are terminal (Owner decision on #6), so a throwing launch leaves its Stage `starting` and the Task idle until the next boot's recovery. Settle in the story that registers the launch handlers (1-6/1-7).
+- source_spec: `docs/implementation-artifacts/spec-1-3-scheduler-gates.md`
+  summary: Reject dependency cycles and dependencies on a bootstrap Task when dependencies are recorded, or emit `deps_unsatisfiable` for them.
+  evidence: medium. `isMergedToMain` never counts a bootstrap Task and the scheduler only treats `cancelled` as unsatisfiable, so such a Task waits in `waiting_on_dependencies` forever. Settle in story 1-8, which records dependencies on approval (review pass 1, #7).

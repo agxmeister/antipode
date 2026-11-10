@@ -70,6 +70,91 @@ describe('daemon', () => {
     expect(logOf(home).find((line) => line['event'] === 'effect_failed')).toMatchObject({ level: 50, error: 'no_handler' });
   });
 
+  it('one tick starts a queued bootstrap Task: implementing with a start_stage effect (AD-11)', async () => {
+    const home = createTempHome();
+    const daemon = await bootDaemon({ env: home.env, clock: fakeClock() });
+    const project = await daemon.coordinator.createProject('p');
+    const task = await daemon.coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
+    await daemon.tick();
+    expect(daemon.store.getTask(task.id)).toMatchObject({ state: 'implementing', waiting_reason: null });
+    expect(daemon.store.effectsOfTask(task.id).map((r) => r.kind)).toEqual(['start_stage']);
+    await daemon.stop('test');
+  });
+
+  it('a full usage window from BootOptions.windowReader holds a queued Task and records one wait notice', async () => {
+    const home = createTempHome();
+    const resets_at = '2026-11-08T15:00:00.000Z';
+    const windowReader = { read: async () => ({ five_hour: { utilization: 97, resets_at }, weekly: { utilization: 5, resets_at } }) };
+    const daemon = await bootDaemon({ env: home.env, clock: fakeClock(), windowReader });
+    const project = await daemon.coordinator.createProject('p');
+    const task = await daemon.coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
+    await daemon.tick();
+    await daemon.tick();
+    await daemon.coordinator.idle();
+    await daemon.executor.drain();
+    expect(daemon.store.getTask(task.id)).toMatchObject({ state: 'queued', waiting_reason: 'usage_window' });
+    expect(daemon.store.effectsOfTask(task.id)).toMatchObject([{ kind: 'notify', status: 'done', effect: { notice_kind: 'usage_window_wait' } }]);
+    await daemon.stop('test');
+    expect(logOf(home).find((l) => l['event'] === 'notice')).toMatchObject({ notice_kind: 'usage_window_wait', task_id: task.id });
+  });
+
+  it('wires the launch guard: with a full window a start_stage stays pending instead of failing no_handler', async () => {
+    const home = createTempHome();
+    const resets_at = '2026-11-08T15:00:00.000Z';
+    const windowReader = { read: async () => ({ five_hour: { utilization: 97, resets_at }, weekly: { utilization: 5, resets_at } }) };
+    const daemon = await bootDaemon({ env: home.env, clock: fakeClock(), windowReader });
+    const project = await daemon.coordinator.createProject('p');
+    const task = await daemon.coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
+    await daemon.tick();
+    await daemon.coordinator.applyEvent(task.id, { type: 'scheduler_start' });
+    await daemon.coordinator.idle();
+    await daemon.executor.drain();
+    expect(daemon.store.getTask(task.id)).toMatchObject({ state: 'implementing', waiting_reason: 'usage_window' });
+    expect(daemon.store.effectsOfTask(task.id).find((r) => r.kind === 'start_stage')).toMatchObject({ status: 'pending', error: null });
+    await daemon.stop('test');
+  });
+
+  it('a full window holds a launch made before the first tick, and the relaunch recovery makes after a restart', async () => {
+    const home = createTempHome();
+    const resets_at = '2026-11-08T15:00:00.000Z';
+    const windowReader = { read: async () => ({ five_hour: { utilization: 97, resets_at }, weekly: { utilization: 5, resets_at } }) };
+    const daemon = await bootDaemon({ env: home.env, clock: fakeClock(), windowReader });
+    const project = await daemon.coordinator.createProject('p');
+    const task = await daemon.coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
+    await daemon.coordinator.applyEvent(task.id, { type: 'scheduler_start' });
+    await daemon.coordinator.idle();
+    await daemon.executor.drain();
+    expect(daemon.store.effectsOfTask(task.id).find((r) => r.kind === 'start_stage')?.status).toBe('pending');
+    await daemon.stop('test');
+
+    const restarted = await bootDaemon({ env: home.env, clock: fakeClock(), windowReader });
+    await restarted.coordinator.idle();
+    await restarted.executor.drain();
+    const launches = restarted.store.effectsOfTask(task.id).filter((r) => r.kind === 'start_stage');
+    expect(launches.map((r) => [r.status, r.effect.kind === 'start_stage' ? r.effect.attempt : 0])).toEqual([
+      ['done', 1],
+      ['pending', 2],
+    ]);
+    expect(restarted.store.getTask(task.id)?.waiting_reason).toBe('usage_window');
+    await restarted.stop('test');
+  });
+
+  it('stop() waits for a tick whose window read is in flight, and the tick finishes cleanly', async () => {
+    const home = createTempHome();
+    let answer!: (value: null) => void;
+    const windowReader = { read: () => new Promise<null>((resolve) => (answer = resolve)) };
+    const daemon = await bootDaemon({ env: home.env, clock: fakeClock(), windowReader });
+    const order: string[] = [];
+    const ticking = daemon.tick().then(() => order.push('tick'));
+    const stopping = daemon.stop('test').then(() => order.push('stop'));
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    expect(order).toEqual([]);
+    answer(null);
+    await Promise.all([ticking, stopping]);
+    expect(order).toEqual(['tick', 'stop']);
+    expect(logOf(home).filter((l) => l['event'] === 'scheduler_step_failed' || l['event'] === 'scheduler_tick_failed')).toEqual([]);
+  });
+
   it('a sleep seen by the deadline tick queues back_online for every Project with an ACTIVE Task', async () => {
     const home = createTempHome();
     const clock = fakeClock();
@@ -155,14 +240,21 @@ describe('daemon', () => {
     await daemon.stop('test');
   });
 
-  it('applies an edited config on SIGHUP and logs config_reloaded', async () => {
-    const home = createTempHome();
-    const daemon = await bootDaemon({ env: home.env });
-    expect(daemon.config().limits.concurrency).toBe(2);
-    home.writeConfig({ owner: { telegram_user_id: 1 }, limits: { concurrency: 3 }, logging: { level: 'debug' } });
+  it('applies an edited config on SIGHUP and logs config_reloaded; the scheduler reads the reloaded limits', async () => {
+    const home = createTempHome({ owner: { telegram_user_id: 1 }, limits: { concurrency: 1 } });
+    const daemon = await bootDaemon({ env: home.env, clock: fakeClock() });
+    expect(daemon.config().limits.concurrency).toBe(1);
+    const first = await daemon.coordinator.createTask({ project_id: (await daemon.coordinator.createProject('a')).id, kind: 'bootstrap' });
+    const second = await daemon.coordinator.createTask({ project_id: (await daemon.coordinator.createProject('b')).id, kind: 'bootstrap' });
+    await daemon.tick();
+    expect(daemon.store.getTask(first.id)?.state).toBe('implementing');
+    expect(daemon.store.getTask(second.id)).toMatchObject({ state: 'queued', waiting_reason: 'concurrency' });
+    home.writeConfig({ owner: { telegram_user_id: 1 }, limits: { concurrency: 2 }, logging: { level: 'debug' } });
     expect(daemon.reload()).toBe(true);
-    expect(daemon.config().limits.concurrency).toBe(3);
+    expect(daemon.config().limits.concurrency).toBe(2);
     expect(daemon.logger.level).toBe('debug');
+    await daemon.tick();
+    expect(daemon.store.getTask(second.id)?.state).toBe('implementing');
     await daemon.stop('test');
     expect(events(home)).toContain('config_reloaded');
   });

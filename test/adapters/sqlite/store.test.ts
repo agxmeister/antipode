@@ -55,12 +55,14 @@ function effect(taskId: string | null, kind: 'integrate' | 'run_release' = 'inte
 }
 
 describe('SqliteStore', () => {
-  it('migration 0002 creates the five STRICT tables', () => {
+  it('migrations 0002 and 0003 create the STRICT Coordinator tables', () => {
     const ts = setup();
     const tables = ts.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>;
-    expect(tables.map((t) => t.name)).toEqual(['effects', 'projects', 'settings', 'stage_events', 'stages', 'tasks']);
-    const sql = ts.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'tasks'").get() as { sql: string };
-    expect(sql.sql).toContain('STRICT');
+    expect(tables.map((t) => t.name)).toEqual(['effects', 'projects', 'settings', 'stage_events', 'stages', 'task_dependencies', 'tasks']);
+    for (const table of ['tasks', 'task_dependencies']) {
+      const sql = ts.db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(table) as { sql: string };
+      expect(sql.sql).toContain('STRICT');
+    }
   });
 
   it('round-trips projects and tasks, patches tasks, and numbers them per Project', () => {
@@ -172,5 +174,63 @@ describe('SqliteStore', () => {
     const p = project('a');
     ts.store.insertProject(p);
     expect(() => ts.store.insertTask(task(p.id, { kind: 'hotfix' as never }))).toThrow(/CHECK/);
+  });
+
+  it('scheduler reads: queued oldest first, counts by state, bootstrap released', () => {
+    const ts = setup();
+    const [a, b] = [project('a'), project('b')];
+    for (const p of [a, b]) ts.store.insertProject(p);
+    const late = task(a.id, { state: 'queued', created_at: '2026-11-08T12:00:02.000Z' });
+    const early = task(a.id, { state: 'queued', created_at: '2026-11-08T12:00:01.000Z' });
+    for (const t of [late, early]) ts.store.insertTask(t);
+    ts.store.insertTask(task(a.id, { state: 'implementing' }));
+    ts.store.insertTask(task(b.id, { state: 'in_review' }));
+    ts.store.insertTask(task(b.id, { kind: 'bootstrap', state: 'released' }));
+    ts.store.insertTask(task(a.id, { kind: 'bootstrap', state: 'in_review' }));
+    expect(ts.store.queuedTasks().map((t) => t.id)).toEqual([early.id, late.id]);
+    expect(ts.store.countTasksInStates(['implementing', 'in_review'])).toBe(3);
+    expect(ts.store.countTasksInStates(['queued'])).toBe(2);
+    expect(ts.store.countTasksInStates([])).toBe(0);
+    expect(ts.store.bootstrapReleased(a.id)).toBe(false);
+    expect(ts.store.bootstrapReleased(b.id)).toBe(true);
+  });
+
+  it('dependencies: insert is idempotent, dependenciesOf returns the Tasks, foreign keys hold', () => {
+    const ts = setup();
+    const p = project('a');
+    ts.store.insertProject(p);
+    const [t, d1, d2] = [task(p.id), task(p.id, { state: 'merged', created_at: '2026-11-08T11:00:00.000Z' }), task(p.id, { state: 'implementing' })];
+    for (const x of [t, d1, d2]) ts.store.insertTask(x);
+    expect(ts.store.dependenciesOf(t.id)).toEqual([]);
+    ts.store.insertDependency(t.id, d2.id);
+    ts.store.insertDependency(t.id, d1.id);
+    ts.store.insertDependency(t.id, d1.id);
+    expect(ts.store.dependenciesOf(t.id).map((x) => [x.id, x.state])).toEqual([
+      [d1.id, 'merged'],
+      [d2.id, 'implementing'],
+    ]);
+    expect(ts.store.dependenciesOf(d1.id)).toEqual([]);
+    expect(() => ts.store.insertDependency(t.id, 'no-such-task')).toThrow(/FOREIGN KEY/);
+    expect(() => ts.store.insertDependency(t.id, t.id)).toThrow(/CHECK/);
+  });
+
+  it('latestNotify finds notify effects by Task, notice kind and key in any status', () => {
+    const ts = setup();
+    const p = project('a');
+    ts.store.insertProject(p);
+    const [t, other] = [task(p.id), task(p.id)];
+    for (const x of [t, other]) ts.store.insertTask(x);
+    const notify = (taskId: string, noticeKind: string, key: string): EffectRow => {
+      const e = { kind: 'notify', notice_kind: noticeKind, task_id: taskId, payload: { key } } as const;
+      return { effect_id: ulid(), task_id: taskId, kind: 'notify', effect: e, status: 'pending', error: null, created_at: NOW, finished_at: null };
+    };
+    const first = notify(t.id, 'usage_window_wait', 'r1');
+    const second = notify(t.id, 'usage_window_wait', 'r2');
+    for (const r of [first, second, notify(other.id, 'usage_window_wait', 'r3'), notify(t.id, 'usage_window_resumed', 'r1')]) ts.store.insertEffect(r);
+    ts.store.markEffect(first.effect_id, 'done', NOW);
+    expect(ts.store.latestNotify(t.id, 'usage_window_wait', 'r1')?.effect_id).toBe(first.effect_id);
+    expect(ts.store.latestNotify(t.id, 'usage_window_wait')?.effect_id).toBe(second.effect_id);
+    expect(ts.store.latestNotify(t.id, 'usage_window_wait', 'r3')).toBeUndefined();
+    expect(ts.store.latestNotify(t.id, 'other')).toBeUndefined();
   });
 });

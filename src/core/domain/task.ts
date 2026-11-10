@@ -45,6 +45,11 @@ export const ACTIVE_STATES: readonly TaskState[] = [
 
 export const TERMINAL_STATES: readonly TaskState[] = ['released', 'cancelled'];
 
+/** Why a Task is not starting or launching its next Stage: the failing AD-11 gate, shown by `/status`. */
+export const WAITING_REASONS = ['paused', 'usage_window', 'concurrency', 'open_reviews', 'bootstrap'] as const;
+export const waitingReasonSchema = z.enum(WAITING_REASONS);
+export type WaitingReason = z.infer<typeof waitingReasonSchema>;
+
 export const TASK_KINDS = ['feature', 'bootstrap'] as const;
 export const taskKindSchema = z.enum(TASK_KINDS);
 export type TaskKind = z.infer<typeof taskKindSchema>;

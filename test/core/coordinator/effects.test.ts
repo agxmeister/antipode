@@ -123,4 +123,63 @@ describe('EffectExecutor (AD-3)', () => {
     expect(e.executor.has('back_online')).toBe(true);
     expect(e.executor.has('start_stage')).toBe(false);
   });
+
+  it('a guard returning held leaves the row pending for the drain while other effects still run; a later drain releases it', async () => {
+    const e = setup();
+    const seen: string[] = [];
+    let open = false;
+    let asked = 0;
+    e.executor.register('back_online', (effect) => {
+      seen.push(effect.project_id);
+    });
+    e.executor.setGuard(['back_online'], (row) => {
+      if (row.effect.kind !== 'back_online' || row.effect.project_id !== 'gated') return 'run';
+      asked++;
+      return open ? 'run' : 'held';
+    });
+    const gated = e.insert(online('gated'));
+    const other = e.insert(online('other'));
+    await e.executor.drain();
+    expect(seen).toEqual(['other']);
+    expect(asked).toBe(1);
+    expect(e.store.getEffect(gated.effect_id)).toMatchObject({ status: 'pending' });
+    expect(e.store.getEffect(other.effect_id)).toMatchObject({ status: 'done' });
+
+    open = true;
+    await e.executor.drain();
+    expect(seen).toEqual(['other', 'gated']);
+    expect(e.store.pendingEffects()).toEqual([]);
+  });
+
+  it('a held row is not asked again within one drain even when a notify schedules another pass', async () => {
+    const e = setup();
+    let asked = 0;
+    e.executor.register('back_online', () => {});
+    e.executor.setGuard(['back_online'], async (row) => {
+      if (row.effect.kind !== 'back_online' || row.effect.project_id !== 'gated') return 'run';
+      asked++;
+      e.insert(online(`late-${asked}`));
+      e.executor.notify();
+      return 'held';
+    });
+    const gated = e.insert(online('gated'));
+    await e.executor.drain();
+    expect(asked).toBe(1);
+    expect(e.store.pendingEffects().map((r) => r.effect_id)).toEqual([gated.effect_id]);
+  });
+
+  it('a throwing guard lets the effect run and logs effect_guard_failed', async () => {
+    const e = setup();
+    const seen: string[] = [];
+    e.executor.register('back_online', (effect) => {
+      seen.push(effect.project_id);
+    });
+    e.executor.setGuard(['back_online'], () => {
+      throw new Error('gate broke');
+    });
+    e.insert(online('x'));
+    await e.executor.drain();
+    expect(seen).toEqual(['x']);
+    expect(e.lines.filter((l) => l.level === 'error')).toMatchObject([{ fields: { event: 'effect_guard_failed', error: 'gate broke' } }]);
+  });
 });
