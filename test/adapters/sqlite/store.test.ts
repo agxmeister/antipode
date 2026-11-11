@@ -20,7 +20,7 @@ function setup() {
 }
 
 function project(name: string): Project {
-  return { id: ulid(), name, paused_at: null, created_at: NOW };
+  return { id: ulid(), name, paused_at: null, telegram_chat_id: null, created_at: NOW };
 }
 
 function task(projectId: string, overrides: Partial<Task> = {}): Task {
@@ -55,11 +55,22 @@ function effect(taskId: string | null, kind: 'integrate' | 'run_release' = 'inte
 }
 
 describe('SqliteStore', () => {
-  it('migrations 0002 and 0003 create the STRICT Coordinator tables', () => {
+  it('migrations 0002 to 0004 create the STRICT Coordinator and Telegram tables', () => {
     const ts = setup();
     const tables = ts.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>;
-    expect(tables.map((t) => t.name)).toEqual(['effects', 'projects', 'settings', 'stage_events', 'stages', 'task_dependencies', 'tasks']);
-    for (const table of ['tasks', 'task_dependencies']) {
+    expect(tables.map((t) => t.name)).toEqual([
+      'callbacks',
+      'effects',
+      'outbox',
+      'projects',
+      'settings',
+      'stage_events',
+      'stages',
+      'task_dependencies',
+      'tasks',
+      'telegram_messages',
+    ]);
+    for (const table of ['tasks', 'task_dependencies', 'outbox', 'callbacks', 'telegram_messages']) {
       const sql = ts.db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(table) as { sql: string };
       expect(sql.sql).toContain('STRICT');
     }
@@ -232,5 +243,91 @@ describe('SqliteStore', () => {
     expect(ts.store.latestNotify(t.id, 'usage_window_wait')?.effect_id).toBe(second.effect_id);
     expect(ts.store.latestNotify(t.id, 'usage_window_wait', 'r3')).toBeUndefined();
     expect(ts.store.latestNotify(t.id, 'other')).toBeUndefined();
+  });
+
+  it('settings get and set, overwriting the value', () => {
+    const ts = setup();
+    expect(ts.store.getSetting('telegram.last_update_id')).toBeUndefined();
+    ts.store.setSetting('telegram.last_update_id', '10', NOW);
+    ts.store.setSetting('telegram.last_update_id', '11', NOW);
+    expect(ts.store.getSetting('telegram.last_update_id')).toBe('11');
+  });
+
+  it('binds a Project to one chat; a chat binds at most one Project', () => {
+    const ts = setup();
+    const [a, b] = [project('a'), project('b')];
+    for (const p of [a, b]) ts.store.insertProject(p);
+    expect(ts.store.projectByChat(-100)).toBeUndefined();
+    ts.store.bindProjectChat(a.id, -100);
+    expect(ts.store.projectByChat(-100)).toMatchObject({ id: a.id, telegram_chat_id: -100 });
+    expect(() => ts.store.bindProjectChat(b.id, -100)).toThrow(/UNIQUE/);
+    ts.store.bindProjectChat(a.id, null);
+    expect(ts.store.projectByChat(-100)).toBeUndefined();
+    expect(() => ts.store.bindProjectChat('nope', -1)).toThrow(/not found/);
+  });
+
+  it('enqueues an outbox group with consecutive per-chat sequences, idempotent by effect_id', () => {
+    const ts = setup();
+    const p = project('a');
+    ts.store.insertProject(p);
+    const t = task(p.id);
+    ts.store.insertTask(t);
+    const msg = (text: string) => ({ kind: 'notice', payload: { method: 'sendMessage' as const, params: { text } }, task_id: t.id });
+    const first = ts.store.enqueueOutbox(-1, [msg('a'), msg('b')], 'eff-1', NOW);
+    expect(first.map((r) => [r.sequence, r.status, r.attempts])).toEqual([
+      [1, 'pending', 0],
+      [2, 'pending', 0],
+    ]);
+    expect(ts.store.enqueueOutbox(-1, [msg('again')], 'eff-1', NOW).map((r) => r.id)).toEqual(first.map((r) => r.id));
+    ts.store.enqueueOutbox(-2, [msg('other chat')], 'eff-2', NOW);
+    const third = ts.store.enqueueOutbox(-1, [msg('c')], null, NOW);
+    expect(third[0]?.sequence).toBe(3);
+    expect(ts.store.outboxOfChat(-1).map((r) => r.payload.params['text'])).toEqual(['a', 'b', 'c']);
+    expect(ts.store.outboxHeads().map((r) => [r.chat_id, r.sequence])).toEqual([
+      [-2, 1],
+      [-1, 1],
+    ]);
+
+    const head = first[0]!;
+    ts.store.markOutboxAttempt(head.id, 1, '2026-11-08T12:00:01.000Z', 'boom');
+    expect(ts.store.getOutbox(head.id)).toMatchObject({ status: 'pending', attempts: 1, error: 'boom', next_attempt_at: '2026-11-08T12:00:01.000Z' });
+    ts.store.markOutboxSent(head.id, 77, NOW);
+    expect(ts.store.getOutbox(head.id)).toMatchObject({ status: 'sent', sent_message_id: 77, attempts: 2, error: null, sent_at: NOW });
+    ts.store.markOutboxFailed(first[1]!.id, 6, 'gone');
+    expect(ts.store.getOutbox(first[1]!.id)).toMatchObject({ status: 'failed', attempts: 6, error: 'gone' });
+    expect(ts.store.outboxHeads().map((r) => [r.chat_id, r.sequence])).toEqual([
+      [-2, 1],
+      [-1, 3],
+    ]);
+  });
+
+  it('finds the latest card send of a Task and round in the outbox and among sent messages', () => {
+    const ts = setup();
+    const p = project('a');
+    ts.store.insertProject(p);
+    const t = task(p.id);
+    ts.store.insertTask(t);
+    const card = (round: number) => ({ kind: 'review_card', round, task_id: t.id, payload: { method: 'sendMessage' as const, params: { text: `r${round}` } } });
+    const [r1] = ts.store.enqueueOutbox(-1, [card(1)], null, NOW);
+    const [r2] = ts.store.enqueueOutbox(-1, [card(2)], null, '2026-11-08T12:00:05.000Z');
+    ts.store.enqueueOutbox(-1, [{ kind: 'review_card', task_id: t.id, round: 2, payload: { method: 'editMessageReplyMarkup', params: {} } }], null, '2026-11-08T12:00:09.000Z');
+    expect(ts.store.latestCardOutbox(t.id)?.id).toBe(r2?.id);
+    expect(ts.store.latestCardOutbox(t.id, 1)?.id).toBe(r1?.id);
+    expect(ts.store.latestCardOutbox(t.id, 3)).toBeUndefined();
+
+    expect(ts.store.latestCardOfTask(t.id)).toBeUndefined();
+    ts.store.insertTelegramMessage({ chat_id: -1, message_id: 5, task_id: t.id, round: 1, kind: 'review_card' });
+    ts.store.insertTelegramMessage({ chat_id: -1, message_id: 6, task_id: t.id, round: 1, kind: 'evidence' });
+    expect(ts.store.latestCardOfTask(t.id)).toEqual({ chat_id: -1, message_id: 5, task_id: t.id, round: 1, kind: 'review_card' });
+    ts.store.insertTelegramMessage({ chat_id: -1, message_id: 5, task_id: t.id, round: 2, kind: 'review_card' });
+    expect(ts.store.getTelegramMessage(-1, 5)?.round).toBe(2);
+  });
+
+  it('round-trips callbacks', () => {
+    const ts = setup();
+    const row = { id: ulid(), command: 'accept', task_id: null, round: 1, args: { finding: 'P1' }, expires_at: null, created_at: NOW };
+    ts.store.insertCallback(row);
+    expect(ts.store.getCallback(row.id)).toEqual(row);
+    expect(ts.store.getCallback('missing')).toBeUndefined();
   });
 });

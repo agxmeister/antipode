@@ -93,7 +93,7 @@ export class Coordinator {
   createProject(name: string): Promise<Project> {
     return this.#enqueue(() =>
       this.#store.transaction(() => {
-        const project = projectSchema.parse({ id: this.#newId(), name, paused_at: null, created_at: this.#now() });
+        const project = projectSchema.parse({ id: this.#newId(), name, paused_at: null, telegram_chat_id: null, created_at: this.#now() });
         this.#store.insertProject(project);
         return project;
       }),

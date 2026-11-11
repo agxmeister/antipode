@@ -3,6 +3,16 @@ import { effectSchema, effectStatusSchema, type EffectRow, type EffectStatus } f
 import { stageEventRowSchema, type StageEventRow } from '../../core/domain/events.ts';
 import { stageSchema, type Stage, type StagePatch, type StageStatus } from '../../core/domain/stage.ts';
 import { ACTIVE_STATES, projectSchema, taskSchema, type Project, type Task, type TaskPatch, type TaskState } from '../../core/domain/task.ts';
+import { ulid } from '../../core/domain/ids.ts';
+import {
+  callbackRowSchema,
+  outboxRowSchema,
+  telegramMessageRowSchema,
+  type CallbackRow,
+  type OutboxDraft,
+  type OutboxRow,
+  type TelegramMessageRow,
+} from '../../core/domain/telegram.ts';
 import type { Store } from '../../core/ports/store.ts';
 import type { SqliteDatabase } from './db.ts';
 
@@ -50,6 +60,36 @@ interface EffectDbRow {
   finished_at: string | null;
 }
 
+const OUTBOX_COLUMNS = [
+  'id',
+  'chat_id',
+  'sequence',
+  'kind',
+  'payload',
+  'task_id',
+  'round',
+  'target_message_id',
+  'target_outbox_id',
+  'sent_message_id',
+  'attempts',
+  'next_attempt_at',
+  'status',
+  'error',
+  'effect_id',
+  'created_at',
+  'sent_at',
+] as const;
+
+function toOutboxRow(row: unknown): OutboxRow {
+  const raw = row as Record<string, unknown>;
+  return outboxRowSchema.parse({ ...raw, payload: JSON.parse(String(raw['payload'])) });
+}
+
+function toCallbackRow(row: unknown): CallbackRow {
+  const raw = row as Record<string, unknown>;
+  return callbackRowSchema.parse({ ...raw, args: JSON.parse(String(raw['args'])) });
+}
+
 function toEffectRow(row: EffectDbRow): EffectRow {
   const effect = effectSchema.parse(JSON.parse(row.payload));
   return {
@@ -91,12 +131,32 @@ export class SqliteStore implements Store {
     pendingEffects: Statement;
     effectsOfTask: Statement;
     markEffect: Statement;
+    getSetting: Statement;
+    setSetting: Statement;
+    bindProjectChat: Statement;
+    projectByChat: Statement;
+    outboxOfEffect: Statement;
+    maxSequence: Statement;
+    insertOutbox: Statement;
+    getOutbox: Statement;
+    outboxHeads: Statement;
+    outboxOfChat: Statement;
+    latestCardOutbox: Statement;
+    latestCardOutboxOfRound: Statement;
+    markOutboxSent: Statement;
+    markOutboxAttempt: Statement;
+    markOutboxFailed: Statement;
+    insertCallback: Statement;
+    getCallback: Statement;
+    insertTelegramMessage: Statement;
+    getTelegramMessage: Statement;
+    latestCardOfTask: Statement;
   };
 
   constructor(db: SqliteDatabase) {
     this.#db = db;
     this.#stmt = {
-      insertProject: db.prepare(insertSql('projects', ['id', 'name', 'paused_at', 'created_at'])),
+      insertProject: db.prepare(insertSql('projects', ['id', 'name', 'paused_at', 'telegram_chat_id', 'created_at'])),
       getProject: db.prepare('SELECT * FROM projects WHERE id = ?'),
       listProjects: db.prepare('SELECT * FROM projects ORDER BY created_at, id'),
       activeProjects: db.prepare(
@@ -133,6 +193,46 @@ export class SqliteStore implements Store {
       pendingEffects: db.prepare("SELECT * FROM effects WHERE status = 'pending' ORDER BY effect_id"),
       effectsOfTask: db.prepare('SELECT * FROM effects WHERE task_id = ? ORDER BY effect_id'),
       markEffect: db.prepare('UPDATE effects SET status = @status, error = @error, finished_at = @finished_at WHERE effect_id = @effect_id'),
+      getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
+      setSetting: db.prepare(
+        'INSERT INTO settings (key, value, updated_at) VALUES (@key, @value, @updated_at) ON CONFLICT (key) DO UPDATE SET value = @value, updated_at = @updated_at',
+      ),
+      bindProjectChat: db.prepare('UPDATE projects SET telegram_chat_id = ? WHERE id = ?'),
+      projectByChat: db.prepare('SELECT * FROM projects WHERE telegram_chat_id = ?'),
+      outboxOfEffect: db.prepare('SELECT * FROM outbox WHERE effect_id = ? ORDER BY chat_id, sequence'),
+      maxSequence: db.prepare('SELECT COALESCE(MAX(sequence), 0) AS max FROM outbox WHERE chat_id = ?'),
+      insertOutbox: db.prepare(insertSql('outbox', OUTBOX_COLUMNS)),
+      getOutbox: db.prepare('SELECT * FROM outbox WHERE id = ?'),
+      outboxHeads: db.prepare(
+        `SELECT o.* FROM outbox o
+         JOIN (SELECT chat_id, MIN(sequence) AS sequence FROM outbox WHERE status = 'pending' GROUP BY chat_id) h
+           ON h.chat_id = o.chat_id AND h.sequence = o.sequence
+         ORDER BY o.chat_id`,
+      ),
+      outboxOfChat: db.prepare('SELECT * FROM outbox WHERE chat_id = ? ORDER BY sequence'),
+      latestCardOutbox: db.prepare(
+        `SELECT * FROM outbox WHERE task_id = ? AND kind GLOB '*_card' AND json_extract(payload, '$.method') LIKE 'send%'
+         ORDER BY created_at DESC, sequence DESC LIMIT 1`,
+      ),
+      latestCardOutboxOfRound: db.prepare(
+        `SELECT * FROM outbox WHERE task_id = ? AND round = ? AND kind GLOB '*_card' AND json_extract(payload, '$.method') LIKE 'send%'
+         ORDER BY created_at DESC, sequence DESC LIMIT 1`,
+      ),
+      markOutboxSent: db.prepare(
+        "UPDATE outbox SET status = 'sent', sent_message_id = @sent_message_id, sent_at = @sent_at, error = NULL, attempts = attempts + 1 WHERE id = @id",
+      ),
+      markOutboxAttempt: db.prepare('UPDATE outbox SET attempts = @attempts, next_attempt_at = @next_attempt_at, error = @error WHERE id = @id'),
+      markOutboxFailed: db.prepare("UPDATE outbox SET status = 'failed', attempts = @attempts, error = @error, next_attempt_at = NULL WHERE id = @id"),
+      insertCallback: db.prepare(insertSql('callbacks', ['id', 'command', 'task_id', 'round', 'args', 'expires_at', 'created_at'])),
+      getCallback: db.prepare('SELECT * FROM callbacks WHERE id = ?'),
+      insertTelegramMessage: db.prepare(
+        `INSERT INTO telegram_messages (chat_id, message_id, task_id, round, kind) VALUES (@chat_id, @message_id, @task_id, @round, @kind)
+         ON CONFLICT (chat_id, message_id) DO UPDATE SET task_id = @task_id, round = @round, kind = @kind`,
+      ),
+      getTelegramMessage: db.prepare('SELECT * FROM telegram_messages WHERE chat_id = ? AND message_id = ?'),
+      latestCardOfTask: db.prepare(
+        `SELECT * FROM telegram_messages WHERE task_id = ? AND kind GLOB '*_card' ORDER BY message_id DESC LIMIT 1`,
+      ),
     };
   }
 
@@ -281,6 +381,116 @@ export class SqliteStore implements Store {
 
   markEffect(effectId: string, status: EffectStatus, finishedAt: string, error?: string): void {
     this.#stmt.markEffect.run({ effect_id: effectId, status, error: error ?? null, finished_at: finishedAt });
+  }
+
+  getSetting(key: string): string | undefined {
+    return (this.#stmt.getSetting.get(key) as { value: string } | undefined)?.value;
+  }
+
+  setSetting(key: string, value: string, updatedAt: string): void {
+    this.#stmt.setSetting.run({ key, value, updated_at: updatedAt });
+  }
+
+  bindProjectChat(projectId: string, chatId: number | null): void {
+    if (this.#stmt.bindProjectChat.run(chatId, projectId).changes !== 1) {
+      throw new Error(`projects row ${projectId} not found`);
+    }
+  }
+
+  projectByChat(chatId: number): Project | undefined {
+    const row = this.#stmt.projectByChat.get(chatId);
+    return row === undefined ? undefined : projectSchema.parse(row);
+  }
+
+  enqueueOutbox(chatId: number, drafts: readonly OutboxDraft[], effectId: string | null, createdAt: string): OutboxRow[] {
+    return this.transaction(() => {
+      if (effectId !== null) {
+        const existing = this.#stmt.outboxOfEffect.all(effectId).map(toOutboxRow);
+        if (existing.length > 0) {
+          return existing;
+        }
+      }
+      let sequence = (this.#stmt.maxSequence.get(chatId) as { max: number }).max;
+      const rows: OutboxRow[] = [];
+      for (const draft of drafts) {
+        sequence += 1;
+        const row = outboxRowSchema.parse({
+          id: draft.id ?? ulid(),
+          chat_id: chatId,
+          sequence,
+          kind: draft.kind,
+          payload: draft.payload,
+          task_id: draft.task_id ?? null,
+          round: draft.round ?? null,
+          target_message_id: draft.target_message_id ?? null,
+          target_outbox_id: draft.target_outbox_id ?? null,
+          sent_message_id: null,
+          attempts: 0,
+          next_attempt_at: null,
+          status: 'pending',
+          error: null,
+          effect_id: effectId,
+          created_at: createdAt,
+          sent_at: null,
+        });
+        this.#stmt.insertOutbox.run({ ...row, payload: JSON.stringify(row.payload) });
+        rows.push(row);
+      }
+      return rows;
+    });
+  }
+
+  getOutbox(id: string): OutboxRow | undefined {
+    const row = this.#stmt.getOutbox.get(id);
+    return row === undefined ? undefined : toOutboxRow(row);
+  }
+
+  outboxHeads(): OutboxRow[] {
+    return this.#stmt.outboxHeads.all().map(toOutboxRow);
+  }
+
+  outboxOfChat(chatId: number): OutboxRow[] {
+    return this.#stmt.outboxOfChat.all(chatId).map(toOutboxRow);
+  }
+
+  latestCardOutbox(taskId: string, round?: number): OutboxRow | undefined {
+    const row = round === undefined ? this.#stmt.latestCardOutbox.get(taskId) : this.#stmt.latestCardOutboxOfRound.get(taskId, round);
+    return row === undefined ? undefined : toOutboxRow(row);
+  }
+
+  markOutboxSent(id: string, sentMessageId: number | null, sentAt: string): void {
+    this.#stmt.markOutboxSent.run({ id, sent_message_id: sentMessageId, sent_at: sentAt });
+  }
+
+  markOutboxAttempt(id: string, attempts: number, nextAttemptAt: string, error: string): void {
+    this.#stmt.markOutboxAttempt.run({ id, attempts, next_attempt_at: nextAttemptAt, error });
+  }
+
+  markOutboxFailed(id: string, attempts: number, error: string): void {
+    this.#stmt.markOutboxFailed.run({ id, attempts, error });
+  }
+
+  insertCallback(row: CallbackRow): void {
+    this.#stmt.insertCallback.run({ ...callbackRowSchema.parse(row), args: JSON.stringify(row.args) });
+  }
+
+  getCallback(id: string): CallbackRow | undefined {
+    const row = this.#stmt.getCallback.get(id);
+    return row === undefined ? undefined : toCallbackRow(row);
+  }
+
+  insertTelegramMessage(row: TelegramMessageRow): void {
+    this.#stmt.insertTelegramMessage.run(telegramMessageRowSchema.parse(row));
+  }
+
+  getTelegramMessage(chatId: number, messageId: number): TelegramMessageRow | undefined {
+    const row = this.#stmt.getTelegramMessage.get(chatId, messageId);
+    return row === undefined ? undefined : telegramMessageRowSchema.parse(row);
+  }
+
+  latestCardOfTask(taskId: string): TelegramMessageRow | undefined {
+    const row = this.#stmt.latestCardOfTask.get(taskId);
+    return row === undefined ? undefined : telegramMessageRowSchema.parse(row);
   }
 
   #update(table: string, key: string, id: string, patch: Record<string, unknown>, allowed: ReadonlySet<string>): void {

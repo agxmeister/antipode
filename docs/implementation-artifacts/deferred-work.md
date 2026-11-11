@@ -21,3 +21,9 @@
 - source_spec: `docs/implementation-artifacts/spec-1-3-scheduler-gates.md`
   summary: Reject dependency cycles and dependencies on a bootstrap Task when dependencies are recorded, or emit `deps_unsatisfiable` for them.
   evidence: medium. `isMergedToMain` never counts a bootstrap Task and the scheduler only treats `cancelled` as unsatisfiable, so such a Task waits in `waiting_on_dependencies` forever. Settle in story 1-8, which records dependencies on approval (review pass 1, #7).
+- source_spec: `docs/implementation-artifacts/spec-1-4-telegram-adapter.md`
+  summary: Route through `bmad-correct-course` adding `delivery_failed` to AD-10's list of kinds sent with sound.
+  evidence: AD-10 says "a loud delivery-failure notice is queued" and EXPERIENCE.md calls it loud, but the `disable_notification` exception list in the same bullet leaves it out. Owner decision 2026-11-11: loud for now.
+- source_spec: `docs/implementation-artifacts/spec-1-4-telegram-adapter.md`
+  summary: Route through `bmad-correct-course` replacing AD-10's `❌` failure reaction with a reaction the Bot API accepts, or with the reply alone.
+  evidence: high. `setMessageReaction` accepts only Telegram's standard reaction set, which lists `👀` and `👎` but not `❌` (grammY 1.46 `ReactionTypeEmoji`). `TelegramMessenger.failAck` sends `❌` as AD-10 says; Telegram will refuse it, the refusal is logged and the reply still goes out.

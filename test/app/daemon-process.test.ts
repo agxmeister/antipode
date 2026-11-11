@@ -28,7 +28,7 @@ describe('daemon process', () => {
     expect(await exited, stderr).toBe(0);
 
     const lines = readLogLines(readFileSync(log, 'utf8'));
-    expect(lines.map((line) => line['msg'])).toEqual(['daemon_started', 'config_reloaded', 'daemon_stopped']);
+    expect(lines.map((line) => line['msg'])).toEqual(['telegram_disabled', 'daemon_started', 'config_reloaded', 'daemon_stopped']);
     expect(lines.at(-1)).toMatchObject({ event: 'daemon_stopped', reason: 'SIGTERM' });
   });
 });

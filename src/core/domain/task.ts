@@ -60,6 +60,8 @@ export const projectSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   paused_at: isoTimestamp.nullable(),
+  /** The Telegram supergroup bound by `/register` (AD-10); null until bound. */
+  telegram_chat_id: z.int().nullable(),
   created_at: isoTimestamp,
 });
 export type Project = z.infer<typeof projectSchema>;

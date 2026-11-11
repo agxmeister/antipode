@@ -2,6 +2,7 @@ import type { EffectRow, EffectStatus } from '../domain/effects.ts';
 import type { StageEventRow } from '../domain/events.ts';
 import type { Stage, StagePatch, StageStatus } from '../domain/stage.ts';
 import type { Project, Task, TaskPatch, TaskState } from '../domain/task.ts';
+import type { CallbackRow, OutboxDraft, OutboxRow, TelegramMessageRow } from '../domain/telegram.ts';
 
 /**
  * The only data access the core uses (AD-1, AD-2). Synchronous, because `applyEvent` runs inside
@@ -56,4 +57,38 @@ export interface Store {
    */
   latestNotify(taskId: string, noticeKind: string, key?: string): EffectRow | undefined;
   markEffect(effectId: string, status: EffectStatus, finishedAt: string, error?: string): void;
+
+  /** `settings` (AD-2): instance-wide values such as `telegram.last_update_id`. */
+  getSetting(key: string): string | undefined;
+  setSetting(key: string, value: string, updatedAt: string): void;
+
+  /** Binds `projectId` to a Telegram chat, or unbinds it with null. A chat binds at most one Project. */
+  bindProjectChat(projectId: string, chatId: number | null): void;
+  projectByChat(chatId: number): Project | undefined;
+
+  /**
+   * Appends `drafts` to the chat's outbox as one group with consecutive `sequence` numbers, in one
+   * transaction. Idempotent by `effectId`: when rows of that effect exist, returns them and inserts nothing.
+   */
+  enqueueOutbox(chatId: number, drafts: readonly OutboxDraft[], effectId: string | null, createdAt: string): OutboxRow[];
+  getOutbox(id: string): OutboxRow | undefined;
+  /** The lowest-`sequence` `pending` row of every chat that has one: the head each chat drains next. */
+  outboxHeads(): OutboxRow[];
+  /** Every row of a chat, in `sequence` order. */
+  outboxOfChat(chatId: number): OutboxRow[];
+  /** The newest send of a card kind for `taskId` (and `round`, when given), in any status. */
+  latestCardOutbox(taskId: string, round?: number): OutboxRow | undefined;
+  markOutboxSent(id: string, sentMessageId: number | null, sentAt: string): void;
+  /** Records a failed attempt that will be retried at `nextAttemptAt`. */
+  markOutboxAttempt(id: string, attempts: number, nextAttemptAt: string, error: string): void;
+  markOutboxFailed(id: string, attempts: number, error: string): void;
+
+  insertCallback(row: CallbackRow): void;
+  getCallback(id: string): CallbackRow | undefined;
+
+  /** Records a sent message; a repeat of the same `(chat_id, message_id)` replaces it. */
+  insertTelegramMessage(row: TelegramMessageRow): void;
+  getTelegramMessage(chatId: number, messageId: number): TelegramMessageRow | undefined;
+  /** The newest card message of `taskId` (kind ending `_card`), if any was sent. */
+  latestCardOfTask(taskId: string): TelegramMessageRow | undefined;
 }

@@ -8,6 +8,7 @@ import { AntipodError } from '../../src/core/domain/errors.ts';
 import { migrations } from '../../src/adapters/sqlite/migrations/index.ts';
 import { fakeClock } from '../helpers/clock.ts';
 import { createTempHome, readLogLines, type TempHome } from '../helpers/home.ts';
+import { CHAT_ID, fakeTelegram, textUpdate } from '../helpers/telegram.ts';
 
 function logOf(home: TempHome): Array<Record<string, unknown>> {
   return readLogLines(readFileSync(join(home.root, 'logs', 'antipod.log'), 'utf8'));
@@ -227,7 +228,7 @@ describe('daemon', () => {
 
     await first.stop('test');
     expect(existsSync(pidFile)).toBe(false);
-    expect(events(home)).toEqual(['daemon_started', 'daemon_stopped']);
+    expect(events(home)).toEqual(['telegram_disabled', 'daemon_started', 'daemon_stopped']);
   });
 
   it('replaces a stale pid file', async () => {
@@ -282,8 +283,122 @@ describe('daemon', () => {
     signals.emit('SIGHUP');
     signals.emit('SIGINT');
     expect(await exit).toBe(0);
-    expect(events(home)).toEqual(['daemon_started', 'config_reloaded', 'daemon_stopped']);
+    expect(events(home)).toEqual(['telegram_disabled', 'daemon_started', 'config_reloaded', 'daemon_stopped']);
     expect(signals.listenerCount('SIGHUP')).toBe(0);
     expect(existsSync(join(home.root, 'data', 'antipod.db-wal'))).toBe(false);
+  });
+
+  describe('with Telegram (fake Api, AD-24)', () => {
+    it('registers the ten commands in menu order once at boot', async () => {
+      const home = createTempHome();
+      const tg = fakeTelegram();
+      const daemon = await bootDaemon({ env: home.env, telegramApi: tg.api });
+      expect(daemon.messenger).toBeDefined();
+      await daemon.stop('test');
+      expect(tg.callsOf('setMyCommands')).toEqual([
+        {
+          commands: [
+            { command: 'register', description: 'Bind this group to a repo' },
+            { command: 'status', description: 'Tasks in this Project' },
+            { command: 'peek', description: 'Latest progress of a Task' },
+            { command: 'parked', description: 'Parking Lot findings' },
+            { command: 'cost', description: 'Usage and cost' },
+            { command: 'pause', description: 'Pause new work' },
+            { command: 'resume', description: 'Resume work' },
+            { command: 'cancel', description: 'Cancel a Task' },
+            { command: 'evidence', description: "Resend a Task's Evidence" },
+            { command: 'log', description: 'Stage history of a Task' },
+          ],
+        },
+      ]);
+      expect(events(home)).not.toContain('telegram_disabled');
+    });
+
+    it('a pending outbox row is sent exactly once by the next daemon and marked sent', async () => {
+      const home = createTempHome();
+      const offline = fakeTelegram();
+      offline.fail('sendMessage', new Error('ENETDOWN'), 100);
+      const first = await bootDaemon({ env: home.env, telegramApi: offline.api });
+      first.messenger!.enqueue(CHAT_ID, [{ kind: 'notice', payload: { method: 'sendMessage', params: { text: 'hello' } } }], null);
+      await first.messenger!.sender.idle();
+      expect(first.store.outboxOfChat(CHAT_ID)).toMatchObject([{ status: 'pending', attempts: 1 }]);
+      await first.stop('test');
+
+      const online = fakeTelegram();
+      const second = await bootDaemon({ env: home.env, telegramApi: online.api });
+      // The row keeps its persisted backoff (1 s after the first attempt), then goes out.
+      await vi.waitFor(() => expect(second.store.outboxOfChat(CHAT_ID)[0]?.status).toBe('sent'), { timeout: 5_000 });
+      await second.stop('test');
+      expect(online.callsOf('sendMessage')).toMatchObject([{ chat_id: CHAT_ID, text: 'hello' }]);
+
+      const again = fakeTelegram();
+      const third = await bootDaemon({ env: home.env, telegramApi: again.api });
+      await third.messenger!.sender.idle();
+      await third.stop('test');
+      expect(again.callsOf('sendMessage')).toEqual([]);
+    });
+
+    it('delivers the usage-window wait notice into the bound chat, silently', async () => {
+      const home = createTempHome();
+      const tg = fakeTelegram();
+      const resets_at = '2026-11-08T15:00:00.000Z';
+      const windowReader = { read: async () => ({ five_hour: { utilization: 97, resets_at }, weekly: { utilization: 5, resets_at } }) };
+      const daemon = await bootDaemon({ env: home.env, clock: fakeClock(), windowReader, telegramApi: tg.api, timeZone: 'UTC' });
+      const project = await daemon.coordinator.createProject('p');
+      daemon.store.bindProjectChat(project.id, CHAT_ID);
+      await daemon.coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
+      await daemon.tick();
+      await daemon.coordinator.idle();
+      await daemon.executor.drain();
+      await vi.waitFor(() => expect(tg.callsOf('sendMessage')).toHaveLength(1));
+      await daemon.stop('test');
+      expect(tg.callsOf('sendMessage')[0]).toMatchObject({
+        chat_id: CHAT_ID,
+        text: '⏸ #1 waiting for usage window · resumes ~15:00',
+        parse_mode: 'HTML',
+        disable_notification: true,
+      });
+    });
+
+    it('a notice for a Project without a chat is done and logged notice_unroutable', async () => {
+      const home = createTempHome();
+      const tg = fakeTelegram();
+      const daemon = await bootDaemon({ env: home.env, clock: fakeClock(), telegramApi: tg.api });
+      const project = await daemon.coordinator.createProject('p');
+      const task = await daemon.coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
+      await daemon.coordinator.notifyOnce(task.id, 'usage_window_wait', 'k', { resets_at: '2026-11-08T15:00:00.000Z' });
+      await daemon.executor.drain();
+      expect(daemon.store.effectsOfTask(task.id)).toMatchObject([{ kind: 'notify', status: 'done' }]);
+      await daemon.stop('test');
+      expect(tg.callsOf('sendMessage')).toEqual([]);
+      expect(logOf(home).find((l) => l['event'] === 'notice_unroutable')).toMatchObject({ level: 40, project_id: project.id, task_id: task.id });
+    });
+
+    it('polls updates: an Owner message in a bound chat gets 👀 and the offset is saved', async () => {
+      const home = createTempHome();
+      const tg = fakeTelegram();
+      const daemon = await bootDaemon({ env: home.env, telegramApi: tg.api });
+      const project = await daemon.coordinator.createProject('p');
+      daemon.store.bindProjectChat(project.id, CHAT_ID);
+      tg.pushUpdates(textUpdate(41, 'add a rest timer', { messageId: 9 }), textUpdate(42, 'spam', { from: 777, messageId: 10 }));
+      await vi.waitFor(() => expect(daemon.store.getSetting('telegram.last_update_id')).toBe('42'));
+      await daemon.stop('test');
+      expect(tg.callsOf('setMessageReaction')).toEqual([{ chat_id: CHAT_ID, message_id: 9, reaction: [{ type: 'emoji', emoji: '👀' }] }]);
+    });
+
+    it('wires back_online and retire_card to the messenger', async () => {
+      const home = createTempHome();
+      const tg = fakeTelegram();
+      const daemon = await bootDaemon({ env: home.env, clock: fakeClock(), telegramApi: tg.api });
+      const project = await daemon.coordinator.createProject('p');
+      daemon.store.bindProjectChat(project.id, CHAT_ID);
+      await daemon.coordinator.createTask({ project_id: project.id, kind: 'bootstrap' });
+      await daemon.coordinator.backOnline(7_200_000);
+      await daemon.executor.drain();
+      await vi.waitFor(() => expect(tg.callsOf('sendMessage')).toHaveLength(1));
+      expect(tg.callsOf('sendMessage')[0]).toMatchObject({ text: 'Back online · 1 Task resumed.', disable_notification: true });
+      expect(daemon.executor.has('retire_card')).toBe(true);
+      await daemon.stop('test');
+    });
   });
 });

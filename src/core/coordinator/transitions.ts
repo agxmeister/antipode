@@ -126,7 +126,11 @@ function enter(next: TaskState, task: Task, stage: Stage | undefined, ctx: Trans
     case 'in_review':
       // One round per Review delivered (AD-16): only a fresh Review from `verifying` starts a round;
       // `undone` and `resume` return to the same Review and keep it.
-      if (opts.cause === 'evidence_verified') patch.review_round = task.review_round + 1;
+      if (opts.cause === 'evidence_verified') {
+        patch.review_round = task.review_round + 1;
+        // The previous round's card keeps no live buttons once a new Review begins (AD-10).
+        if (task.review_round > 0) effects.push({ kind: 'retire_card', task_id: task.id, round: task.review_round });
+      }
       break;
     case 'accept_pending':
       patch.undo_expires_at = new Date(ctx.now.getTime() + ctx.limits.undo_accept_ms).toISOString();

@@ -19,7 +19,9 @@ export const effectSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('run_release'), task_id: id }),
   /** The Mac was asleep for `gap_ms`; one per Project with an ACTIVE Task (AD-18). */
   z.strictObject({ kind: z.literal('back_online'), project_id: id, gap_ms: z.int().nonnegative() }),
-  /** An Owner-facing card or notice of kind `notice_kind`; templates arrive with the Telegram stories. */
+  /** Strip the keyboard of the Task's card of Review round `round`; a new round has begun (AD-10). */
+  z.strictObject({ kind: z.literal('retire_card'), task_id: id, round: z.int().positive() }),
+  /** An Owner-facing card or notice of kind `notice_kind`, rendered by a `cards/` template of the Telegram adapter. */
   z.strictObject({
     kind: z.literal('notify'),
     notice_kind: z.string().min(1),

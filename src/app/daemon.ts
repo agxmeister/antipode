@@ -1,6 +1,8 @@
+import { Api } from 'grammy';
 import { migrate } from '../adapters/sqlite/migrate.ts';
 import { openDatabase, type SqliteDatabase } from '../adapters/sqlite/db.ts';
 import { SqliteStore } from '../adapters/sqlite/store.ts';
+import { TelegramMessenger } from '../adapters/telegram/messenger.ts';
 import { Coordinator } from '../core/coordinator/coordinator.ts';
 import { Deadlines } from '../core/coordinator/deadlines.ts';
 import { EffectExecutor } from '../core/coordinator/effects.ts';
@@ -14,6 +16,7 @@ import { loadConfig, type Config } from './config.ts';
 import { ensureHome, resolveHome, type HomePaths } from './home.ts';
 import { createLogger, type AppLogger, type Logger } from './logger.ts';
 import { acquirePidLock } from './pid-lock.ts';
+import { readInstanceSecrets } from './secrets.ts';
 
 export type StopSignal = 'SIGTERM' | 'SIGINT';
 
@@ -35,6 +38,8 @@ export interface Daemon {
   readonly executor: EffectExecutor;
   readonly deadlines: Deadlines;
   readonly scheduler: Scheduler;
+  /** The Telegram surface; undefined when `secrets/antipod.env` has no `TELEGRAM_BOT_TOKEN` and no `telegramApi` was given. */
+  readonly messenger: TelegramMessenger | undefined;
   config(): Config;
   /** Re-reads `config.yaml`; keeps the previous config when it is invalid. Returns whether it applied. */
   reload(): boolean;
@@ -50,6 +55,10 @@ export interface BootOptions {
   clock?: Clock;
   /** Usage-window reader; defaults to one that has no reading (the `anthropic-usage` adapter is story 1-16). */
   windowReader?: WindowReader;
+  /** The grammY `Api` to use instead of one built from `TELEGRAM_BOT_TOKEN`; tests pass one with a transformer (AD-24). */
+  telegramApi?: Api;
+  /** IANA zone for times in messages; the host's local zone by default. */
+  timeZone?: string;
 }
 
 /** No reading: the usage gate stays open (AD-12 fallback arrives with the estimator). */
@@ -87,6 +96,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   let executor: EffectExecutor;
   let deadlines: Deadlines;
   let scheduler: Scheduler;
+  let messenger: TelegramMessenger | undefined;
   try {
     config = loadConfig(paths.config);
     logger.level = config.logging.level;
@@ -102,14 +112,37 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       policy: () => ({ limits: config.limits, roles: config.roles }),
     });
     executor = new EffectExecutor(store, clock, logger);
-    executor.register('back_online', (effect) => {
-      // The silent Telegram notice is a later handler; for now the gap is on record.
-      logger.info({ event: 'back_online', project_id: effect.project_id, gap_ms: effect.gap_ms }, 'back_online');
-    });
-    executor.register('notify', (effect) => {
-      // Telegram templates are later stories; for now the notice is on record.
-      logger.info({ event: 'notice', notice_kind: effect.notice_kind, task_id: effect.task_id, project_id: effect.project_id, payload: effect.payload }, 'notice');
-    });
+    const api = options.telegramApi ?? telegramApiFromSecrets(paths.secrets);
+    if (api === undefined) {
+      // No bot token: the daemon runs without Telegram and keeps notices on record in the log.
+      logger.warn({ event: 'telegram_disabled', reason: 'no TELEGRAM_BOT_TOKEN in secrets/antipod.env' }, 'telegram_disabled');
+      executor.register('back_online', (effect) => {
+        logger.info({ event: 'back_online', project_id: effect.project_id, gap_ms: effect.gap_ms }, 'back_online');
+      });
+      executor.register('notify', (effect) => {
+        logger.info({ event: 'notice', notice_kind: effect.notice_kind, task_id: effect.task_id, project_id: effect.project_id, payload: effect.payload }, 'notice');
+      });
+      executor.register('retire_card', (effect) => {
+        logger.info({ event: 'retire_card', task_id: effect.task_id, round: effect.round }, 'retire_card');
+      });
+    } else {
+      const telegram = new TelegramMessenger({
+        api,
+        store,
+        clock,
+        log: logger,
+        config: () => ({
+          ownerId: config.owner.telegram_user_id,
+          staleAfterMs: config.telegram.stale_after_ms,
+          outboxRetries: config.outbox.retries,
+        }),
+        ...(options.timeZone === undefined ? {} : { timeZone: options.timeZone }),
+      });
+      messenger = telegram;
+      executor.register('notify', (effect, row) => telegram.notify(effect, row));
+      executor.register('back_online', (effect, row) => telegram.backOnline(effect, row));
+      executor.register('retire_card', (effect, row) => telegram.retireCard(effect, row));
+    }
     deadlines = new Deadlines(clock, undefined, logger);
     scheduler = new Scheduler({
       store,
@@ -125,6 +158,8 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     const recovery = await recover({ store, coordinator, executor, clock, log: logger });
     // Attached after recovery so nothing drains until recovery has settled the orphaned launches.
     coordinator.onEffectsCommitted(() => executor.notify());
+    // After recovery: the replayed effects have queued their rows, and the sender resends every unsent one (AD-18).
+    await messenger?.start();
 
     logger.info(
       {
@@ -139,6 +174,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   } catch (error) {
     logger.fatal({ event: 'daemon_boot_failed', ...errorFields(error) }, 'daemon_boot_failed');
     try {
+      await messenger?.stop();
       db?.close();
     } finally {
       await appLogger.close();
@@ -178,6 +214,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     executor,
     deadlines,
     scheduler,
+    messenger,
     tick: onTick,
     config: () => config,
     reload() {
@@ -196,6 +233,8 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     stop(reason) {
       stopped ??= (async () => {
         clearInterval(tick);
+        // No new Owner input and no sends in flight; unsent rows are resent at next boot (AD-18).
+        await messenger?.stop();
         await scheduler.idle();
         // Let queued transactions and the drain in flight finish before the database closes; nothing new
         // starts, and pending effects replay at next boot (AD-18).
@@ -212,6 +251,12 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       return stopped;
     },
   };
+}
+
+/** A grammY `Api` for `TELEGRAM_BOT_TOKEN` from `secrets/antipod.env`, or undefined without one. */
+function telegramApiFromSecrets(secretsDir: string): Api | undefined {
+  const token = readInstanceSecrets(secretsDir)['TELEGRAM_BOT_TOKEN'];
+  return token === undefined || token === '' ? undefined : new Api(token);
 }
 
 export interface RunOptions extends BootOptions {

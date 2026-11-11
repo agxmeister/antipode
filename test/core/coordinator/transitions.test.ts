@@ -381,6 +381,7 @@ describe('other columns', () => {
   it('review_round increments once per Review delivered: only on entry to in_review from verifying (AD-16)', () => {
     const verified = applied(transition(task('verifying', { review_round: 1 }), stage('verifying'), sample('evidence_verified'), ctx()));
     expect(verified.patch.review_round).toBe(2);
+    expect(verified.effects).toEqual([{ kind: 'retire_card', task_id: 'task-1', round: 1 }]);
     const correction = applied(transition(task('in_review', { current_stage_id: null, review_round: 2 }), undefined, sample('correction'), ctx()));
     expect(correction.patch.review_round).toBeUndefined();
   });
@@ -390,6 +391,15 @@ describe('other columns', () => {
     const resumed = applied(transition(paused, undefined, sample('resume'), ctx()));
     expect(resumed.next).toBe('in_review');
     expect(resumed.patch.review_round).toBeUndefined();
+    expect(resumed.effects).toEqual([]);
+  });
+
+  it('the first Review retires no card; undone back to in_review retires none either (AD-10)', () => {
+    const first = applied(transition(task('verifying', { review_round: 0 }), stage('verifying'), sample('evidence_verified'), ctx()));
+    expect(first.patch.review_round).toBe(1);
+    expect(first.effects).toEqual([]);
+    const undone = applied(transition(task('accept_pending', { current_stage_id: null, review_round: 2 }), undefined, sample('undone'), ctx()));
+    expect(undone.effects).toEqual([]);
   });
 
   it('approved assigns the per-Project Task number once', () => {
