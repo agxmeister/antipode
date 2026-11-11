@@ -249,6 +249,44 @@ describe('OutboxSender', () => {
     expect(h.ts.store.outboxOfChat(CHAT_ID).filter((r) => r.kind === 'delivery_failed')).toHaveLength(1);
   });
 
+  it.each(['Bad Request: message to edit not found', "Bad Request: message can't be edited"])(
+    'an edit refused with "%s" fails without a delivery-failure notice',
+    async (description) => {
+      const h = harness();
+      const [id] = h.enqueue([{ kind: 'retire_card', target_message_id: 77, payload: { method: 'editMessageReplyMarkup', params: { reply_markup: { inline_keyboard: [] } } } }]);
+      h.tg.fail('editMessageReplyMarkup', { error_code: 400, description });
+      await h.settle();
+      expect(h.ts.store.getOutbox(id!)).toMatchObject({ status: 'failed', attempts: 1 });
+      expect(h.ts.store.outboxOfChat(CHAT_ID)).toHaveLength(1);
+      expect(h.tg.callsOf('sendMessage')).toEqual([]);
+    },
+  );
+
+  it('a row enqueued after the drain last looked but before its worker ended is still sent', async () => {
+    const h = harness();
+    const original = h.ts.store.outboxHeads.bind(h.ts.store);
+    let injected = false;
+    let injecting = false;
+    h.ts.store.outboxHeads = () => {
+      const heads = original();
+      if (!injected && !injecting && h.texts().length === 1 && !heads.some((r) => r.chat_id === CHAT_ID)) {
+        // The drain just found the chat empty: enqueue and wake while its worker is still registered.
+        injected = true;
+        injecting = true;
+        h.enqueue([msg('second')]);
+        h.sender.wake();
+        injecting = false;
+      }
+      return heads;
+    };
+    h.enqueue([msg('first')]);
+    await h.settle();
+    await h.sender.idle();
+    expect(injected).toBe(true);
+    expect(h.texts()).toEqual(['first', 'second']);
+    expect(h.ts.store.outboxOfChat(CHAT_ID).map((r) => r.status)).toEqual(['sent', 'sent']);
+  });
+
   it('a waiting row blocks only its own chat', async () => {
     const h = harness();
     h.tg.fail('sendMessage', serverError);

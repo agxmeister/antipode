@@ -38,7 +38,23 @@ export interface CommandInput extends InboundMessage {
   args: string;
 }
 
+/**
+ * Handles one Owner command.
+ *
+ * Updates are handled one at a time, and `telegram.last_update_id` is saved only after the handler
+ * returns. A handler must therefore return quickly (commit a Coordinator event and let effects do the
+ * work), so the acks of later updates stay within 5 s (NFR-6), and must be idempotent: an update is
+ * handled again if the daemon dies mid-handler.
+ */
 export type CommandHandler = (input: CommandInput) => Promise<void> | void;
+/**
+ * Handles Owner text that is not a command.
+ *
+ * Updates are handled one at a time, and `telegram.last_update_id` is saved only after the handler
+ * returns. A handler must therefore return quickly (commit a Coordinator event and let effects do the
+ * work), so the acks of later updates stay within 5 s (NFR-6), and must be idempotent: an update is
+ * handled again if the daemon dies mid-handler.
+ */
 export type TextHandler = (input: InboundMessage) => Promise<void> | void;
 
 export interface CallbackInput {
@@ -49,7 +65,15 @@ export interface CallbackInput {
   messageId: number | undefined;
 }
 
-/** A button command: the Task states its rows are valid in, and the handler that returns the toast. */
+/**
+ * A button command: the Task states its rows are valid in, and the handler that returns the toast.
+ *
+ * Updates are handled one at a time, and `telegram.last_update_id` is saved only after the handler
+ * returns. A handler must therefore return quickly (commit a Coordinator event and let effects do the
+ * work), so the acks of later updates stay within 5 s (NFR-6), and must be idempotent: an update is
+ * handled again if the daemon dies mid-handler.
+ * A handler slower than 4 s gets its tap answered without text and its toast sent as a reply.
+ */
 export interface CallbackCommand {
   /** States the Task must be in; omit for a command without a Task. */
   states?: readonly TaskState[];

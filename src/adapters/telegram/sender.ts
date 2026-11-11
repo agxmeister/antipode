@@ -39,10 +39,16 @@ function errorText(error: unknown): string {
 }
 
 /** Maps a failed call to retry or give up (AD-10): 429, 5xx and network errors retry; other 4xx are permanent. */
-function classify(error: unknown): Outcome {
+/** Edit refusals for a message the Owner deleted (or one too old to edit): nothing to tell the Owner. */
+const EDIT_GONE = ['message to edit not found', "message can't be edited"];
+
+function classify(error: unknown, edit: boolean): Outcome {
   if (error instanceof GrammyError) {
     if (error.description.includes(NOT_MODIFIED)) {
       return { kind: 'sent', messageId: null };
+    }
+    if (edit && error.error_code === 400 && EDIT_GONE.some((text) => error.description.includes(text))) {
+      return { kind: 'failed', error: errorText(error), notice: false };
     }
     if (error.error_code === 429) {
       const after = error.parameters.retry_after;
@@ -139,6 +145,11 @@ export class OutboxSender {
       })
       .finally(() => {
         this.#workers.delete(chatId);
+        // A wake() between the drain's last look and this point saw the worker still registered and
+        // started nothing: look again, unless a timer already covers the chat.
+        if (this.#running && !this.#timers.has(chatId) && this.#store.outboxHeads().some((row) => row.chat_id === chatId)) {
+          this.#startWorker(chatId);
+        }
       });
     this.#workers.set(chatId, worker);
   }
@@ -221,7 +232,7 @@ export class OutboxSender {
             : null;
       return { kind: 'sent', messageId };
     } catch (error) {
-      return classify(error);
+      return classify(error, isEditMethod(method));
     }
   }
 
