@@ -38,10 +38,10 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Maps a failed call to retry or give up (AD-10): 429, 5xx and network errors retry; other 4xx are permanent. */
 /** Edit refusals for a message the Owner deleted (or one too old to edit): nothing to tell the Owner. */
 const EDIT_GONE = ['message to edit not found', "message can't be edited"];
 
+/** Maps a failed call to retry or give up (AD-10): 429, 5xx and network errors retry; other 4xx are permanent. */
 function classify(error: unknown, edit: boolean): Outcome {
   if (error instanceof GrammyError) {
     if (error.description.includes(NOT_MODIFIED)) {

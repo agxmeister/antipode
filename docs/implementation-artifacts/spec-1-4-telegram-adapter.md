@@ -2,7 +2,7 @@
 title: 'Telegram adapter'
 type: 'feature'
 created: '2026-11-10'
-status: 'in-progress'
+status: 'done'
 baseline_commit: '97d7ac7367feb99b4c37d385faeb1c8babd69200'
 route: 'dispatch'
 review_loop_iteration: 0
@@ -77,18 +77,18 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `package.json` -- add `grammy@~1.46` -- AD-10 stack
-- [ ] `src/adapters/sqlite/migrations/0004-telegram.ts` -- `projects.telegram_chat_id INTEGER UNIQUE`; STRICT `outbox` (`id, chat_id, sequence, kind, payload, task_id, round, target_message_id, target_outbox_id, sent_message_id, attempts, next_attempt_at, status pending|sent|failed, error, effect_id, created_at, sent_at`, `UNIQUE(chat_id, sequence)`, `UNIQUE(effect_id, kind, sequence)`), `callbacks` (`id, command, task_id, round, args, expires_at, created_at`), `telegram_messages` (`chat_id, message_id, task_id, round, kind`, PK chat+message) -- AD-10 rows
-- [ ] `src/core/domain/telegram.ts` -- zod row schemas, `OutboxPayload` (`method` of sendMessage|editMessageText|editMessageReplyMarkup|sendPhoto|sendVideo|sendDocument, `params`, files as `{file_path}`) -- typed rows
-- [ ] `src/core/ports/store.ts`, `src/adapters/sqlite/store.ts` -- methods in the Code Map; enqueue is idempotent by `effect_id` -- persistence
-- [ ] `src/core/ports/messenger.ts` -- `Messenger { notify(effect, row), backOnline(effect, row), retireCard(effect, row), failAck(chatId, messageId, text) }` -- port the app wires to effects
-- [ ] `src/adapters/telegram/cards/` -- `card.ts` (Card contract, `escapeHtml`, `clip`, keyboard builder that inserts `callbacks` rows), one module per kind: `usage-window-wait`, `usage-window-resumed`, `back-online`, `delivery-failed`; local `~HH:MM` times -- templates
-- [ ] `src/adapters/telegram/sender.ts` -- per-chat in-sequence drain, retry and backoff, `telegram_messages` on success, delivery-failure notice -- outbox
-- [ ] `src/adapters/telegram/poller.ts` -- `getUpdates` loop (`timeout` 30, abortable, backoff on error), Owner filter, `👀`, dispatch to `commands`/`callbacks`/`text` registries, callback validation, stale handling -- inbound
-- [ ] `src/adapters/telegram/messenger.ts` -- `TelegramMessenger` implementing the port; `setMyCommands` on `start()` -- composition of the adapter
-- [ ] `src/app/daemon.ts`, `src/app/secrets.ts` -- read the token, build the `Api` (`BootOptions.telegramApi` for tests), wire handlers and lifecycle -- composition root
-- [ ] `test/helpers/telegram.ts` -- transformer fake that records calls and scripts `getUpdates` and errors -- AD-24 fake
-- [ ] `test/adapters/telegram/{sender,poller,cards}.test.ts`, `test/adapters/sqlite/store.test.ts`, `test/app/daemon.test.ts` -- one test per matrix row, clipping at 4096/1024, `setMyCommands` at boot, outbox replay after restart -- proof
+- [x] `package.json` -- add `grammy@~1.46` -- AD-10 stack
+- [x] `src/adapters/sqlite/migrations/0004-telegram.ts` -- `projects.telegram_chat_id INTEGER UNIQUE`; STRICT `outbox` (`id, chat_id, sequence, kind, payload, task_id, round, target_message_id, target_outbox_id, sent_message_id, attempts, next_attempt_at, status pending|sent|failed, error, effect_id, created_at, sent_at`, `UNIQUE(chat_id, sequence)`, `UNIQUE(effect_id, kind, sequence)`), `callbacks` (`id, command, task_id, round, args, expires_at, created_at`), `telegram_messages` (`chat_id, message_id, task_id, round, kind`, PK chat+message) -- AD-10 rows
+- [x] `src/core/domain/telegram.ts` -- zod row schemas, `OutboxPayload` (`method` of sendMessage|editMessageText|editMessageReplyMarkup|sendPhoto|sendVideo|sendDocument, `params`, files as `{file_path}`) -- typed rows
+- [x] `src/core/ports/store.ts`, `src/adapters/sqlite/store.ts` -- methods in the Code Map; enqueue is idempotent by `effect_id` -- persistence
+- [x] `src/core/ports/messenger.ts` -- `Messenger { notify(effect, row), backOnline(effect, row), retireCard(effect, row), failAck(chatId, messageId, text) }` -- port the app wires to effects
+- [x] `src/adapters/telegram/cards/` -- `card.ts` (Card contract, `escapeHtml`, `clip`, keyboard builder that inserts `callbacks` rows), one module per kind: `usage-window-wait`, `usage-window-resumed`, `back-online`, `delivery-failed`; local `~HH:MM` times -- templates
+- [x] `src/adapters/telegram/sender.ts` -- per-chat in-sequence drain, retry and backoff, `telegram_messages` on success, delivery-failure notice -- outbox
+- [x] `src/adapters/telegram/poller.ts` -- `getUpdates` loop (`timeout` 30, abortable, backoff on error), Owner filter, `👀`, dispatch to `commands`/`callbacks`/`text` registries, callback validation, stale handling -- inbound
+- [x] `src/adapters/telegram/messenger.ts` -- `TelegramMessenger` implementing the port; `setMyCommands` on `start()` -- composition of the adapter
+- [x] `src/app/daemon.ts`, `src/app/secrets.ts` -- read the token, build the `Api` (`BootOptions.telegramApi` for tests), wire handlers and lifecycle -- composition root
+- [x] `test/helpers/telegram.ts` -- transformer fake that records calls and scripts `getUpdates` and errors -- AD-24 fake
+- [x] `test/adapters/telegram/{sender,poller,cards}.test.ts`, `test/adapters/sqlite/store.test.ts`, `test/app/daemon.test.ts` -- one test per matrix row, clipping at 4096/1024, `setMyCommands` at boot, outbox replay after restart -- proof
 
 **Acceptance Criteria:**
 - Given a daemon booted with a fake `Api`, when it starts, then `setMyCommands` is called once with the ten commands in menu order.
@@ -98,9 +98,53 @@ context:
 
 ## Implementation Notes
 
+- `outbox.retries` counts retries after the first attempt, as Stage retries do: with the default 5, a row fails after 6 attempts.
+- A pending row keeps its saved `next_attempt_at` across a restart, so it may wait up to 60 s before it is resent.
+- An edit whose target row failed fails with `target_failed` and queues no notice of its own, since the target already queued one.
+- A `notice_kind` without a template throws, so its effect is marked `failed`. Later stories add kinds with `TelegramMessenger.registerNotice`.
+- `back_online` counts the Project's ACTIVE Tasks and uses the singular `1 Task resumed.` for one.
+- Telegram's reaction set has no `❌`, so `failAck`'s reaction may be refused. The refusal is logged and the reply still goes out. Logged in `deferred-work.md` for correct-course.
+- `cards/` imports the notice-kind constants from `core/coordinator/scheduler.ts`. Lint allows it.
+- `projects.telegram_chat_id` is unique through an index, because SQLite cannot `ADD COLUMN ... UNIQUE`.
+- The implementation commit is d0731e2.
+
 ## Spec Change Log
 
 ## Review Triage Log
+
+Pass 1 (blind hunter BH, edge-case hunter ECH, verification gap VG):
+
+| # | Source | Finding | Verdict | Evidence | Route |
+|---|--------|---------|---------|----------|-------|
+| 1 | BH/ECH | Sender loses a wake-up between the worker finding no head and `.finally` deleting it | medium | `wake()` skips a chat whose worker is still registered; a row enqueued in that microtask gap waits for an unrelated wake | patch |
+| 2 | BH/ECH | A failed edit of a deleted card queues a loud delivery-failure notice | medium | Every 4xx except 429 fails with `notice: true`; `retire_card` on a card the Owner deleted gives `400 message to edit not found` and a sound | patch |
+| 3 | BH/ECH | Command and text handlers run serially without a time limit, so a slow one delays later acks past 5 s; handlers also run twice after a mid-handler crash | medium | `handleUpdate` awaits each handler; the registry docs require neither speed nor idempotency, and stories 1-5 to 1-15 write these handlers | patch (doc contract) |
+| 4 | VG/BH | `retireCard` is never run by a test | medium | Only `executor.has('retire_card')` and the transition are checked | patch |
+| 5 | VG | `notify` replying to the Task's latest card is untested | medium | No test passes a card through `notify` or asserts `reply_parameters` | patch |
+| 6 | VG/BH | `failAck` is untested, including the expected `❌` refusal | medium | Grep finds no `failAck` in `test/` | patch |
+| 7 | VG | `back_online` per-Project count is not pinned | low | The only daemon test has one Project and one Task; the fix is one test | patch |
+| 8 | VG/BH | A notice kind without a template is not shown to fail its effect, and the Owner sees nothing | low | Only templated kinds are emitted today | defer |
+| 9 | BH/ECH | 401 or 409 from `getUpdates` is retried forever with warn logs only | medium | Real for a revoked token or a second poller on the same token; Telegram is the broken channel, so where to surface it is a design choice | defer |
+| 10 | ECH | `#attempt` throwing leaves the chat without a timer | low | Needs a SQLite write failure; a retry timer adds a branch | reject |
+| 11 | ECH | Edit target `sent` with null `sent_message_id` retries to exhaustion | false | Only edits are marked sent with a null id (`not modified`); edits target sends, which always return a `message_id` | reject |
+| 12 | BH/ECH | Missing `{file_path}` is retried as a network error | low | Evidence files are immutable and exist before rows reference them; no media is sent until 1-10/1-11 | reject |
+| 13 | ECH | Backward wall-clock jump stretches a backoff wait | low | Needs a clock jump during a retry; capping adds a branch | reject |
+| 14 | ECH | `setSetting` throwing outside the try ends the poll loop | low | Needs a SQLite write failure | reject |
+| 15 | ECH | Corrupt `telegram.last_update_id` gives `NaN` | false | Only `handleUpdate` writes it, always `String(update_id)` | reject |
+| 16 | BH/ECH | `/cmd@otherbot` dispatched as our command | low | One private group per Project with only Owner and bot (EXPERIENCE.md); the fix needs `getMe` and new state | reject |
+| 17 | ECH | Tap in a chat whose Project was unbound still runs | low | No unbind flow exists | reject |
+| 18 | ECH | Registered row whose command has no handler gets the replaced toast | low | Unknown command is treated as stale by design; later stories register their commands | reject |
+| 19 | ECH | `👀` with no follow-up for unknown command or no text handler | false | EXPERIENCE.md: a non-actionable message keeps `👀` and nothing else is sent; Intake is 1-8 | reject |
+| 20 | BH/ECH | Latest-card queries order by per-chat counters across chats; `UNIQUE (effect_id, kind, sequence)` adds no constraint | low | No rebind flow exists; migration 0004 is committed (AD-23) | reject |
+| 21 | BH/ECH | `notify` replay renders before the idempotency check, leaving orphan `callbacks` rows | low | Pending effects replay only after a crash, and no current template has buttons | reject |
+| 22 | ECH | Invalid `resets_at` string throws `RangeError` | false | The scheduler copies `resets_at` from a zod-validated reading | reject |
+| 23 | ECH | `fit` with fixed text over the limit goes negative | false | Every template's fixed text is under 80 characters | reject |
+| 24 | ECH | Inline `# comment` after an unquoted secret value is kept | low | Unusual in a hand-written env file; adds parser rules | reject |
+| 25 | BH | 429 counts against `outbox.retries`, so a long Review can fail mid-sequence | low | Each retry honours `retry_after`; MVP Reviews are a few messages | reject |
+| 26 | BH | `callbacks` never pruned; non-Review stale taps get Review copy | low | Growth is a few rows per card; the stale copy is the Owner's decision | reject |
+| 27 | BH | `back_online` counts at run time, not emit time | low | Effects run right after commit; only a crash replay shifts the count | reject |
+| 28 | BH | `retire_card` strips only the newest card of the round | false | A round has one Review card, edited in place; `/evidence` copies have no buttons | reject |
+| 29 | BH | `secrets/antipod.env` mode not checked | low | `secrets/` is created mode 700 by `ensureHome` | reject |
 
 ## Design Notes
 

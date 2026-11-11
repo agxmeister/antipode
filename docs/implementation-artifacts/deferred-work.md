@@ -27,3 +27,9 @@
 - source_spec: `docs/implementation-artifacts/spec-1-4-telegram-adapter.md`
   summary: Route through `bmad-correct-course` replacing AD-10's `❌` failure reaction with a reaction the Bot API accepts, or with the reply alone.
   evidence: high. `setMessageReaction` accepts only Telegram's standard reaction set, which lists `👀` and `👎` but not `❌` (grammY 1.46 `ReactionTypeEmoji`). `TelegramMessenger.failAck` sends `❌` as AD-10 says; Telegram will refuse it, the refusal is logged and the reply still goes out.
+- source_spec: `docs/implementation-artifacts/spec-1-4-telegram-adapter.md`
+  summary: Surface a `getUpdates` that keeps failing with 401 (revoked token) or 409 (second poller or webhook) somewhere the Owner sees it, and consider `deleteWebhook` at start.
+  evidence: medium. `Poller.#run` retries every error with backoff and logs only `telegram_poll_failed` warnings, so Telegram silently goes deaf. Telegram is the broken channel, so the surface (daemon status, CLI, or plist exit) is an Owner decision (review pass 1, #9).
+- source_spec: `docs/implementation-artifacts/spec-1-4-telegram-adapter.md`
+  summary: Test that a `notify` with an unregistered `notice_kind` marks its effect `failed` and queues nothing, and decide whether the Owner should see it.
+  evidence: low today, since only the two usage-window kinds are emitted and both have templates. Settle in the first story that emits a new kind (1-11/1-14) (review pass 1, #8).
