@@ -90,10 +90,18 @@ export class Coordinator {
     return this.#clock.now().toISOString();
   }
 
-  createProject(name: string): Promise<Project> {
+  /** Inserts a Project; `repoUrl` is the remote it was registered from (null outside registration). */
+  createProject(name: string, repoUrl: string | null = null): Promise<Project> {
     return this.#enqueue(() =>
       this.#store.transaction(() => {
-        const project = projectSchema.parse({ id: this.#newId(), name, paused_at: null, telegram_chat_id: null, created_at: this.#now() });
+        const project = projectSchema.parse({
+          id: this.#newId(),
+          name,
+          paused_at: null,
+          telegram_chat_id: null,
+          repo_url: repoUrl,
+          created_at: this.#now(),
+        });
         this.#store.insertProject(project);
         return project;
       }),

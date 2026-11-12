@@ -2,6 +2,8 @@ import { Api } from 'grammy';
 import { migrate } from '../adapters/sqlite/migrate.ts';
 import { openDatabase, type SqliteDatabase } from '../adapters/sqlite/db.ts';
 import { SqliteStore } from '../adapters/sqlite/store.ts';
+import { GitRepo } from '../adapters/git/repo.ts';
+import { REGISTER_COMMAND } from '../adapters/telegram/poller.ts';
 import { TelegramMessenger } from '../adapters/telegram/messenger.ts';
 import { Coordinator } from '../core/coordinator/coordinator.ts';
 import { Deadlines } from '../core/coordinator/deadlines.ts';
@@ -16,6 +18,7 @@ import { loadConfig, type Config } from './config.ts';
 import { ensureHome, resolveHome, type HomePaths } from './home.ts';
 import { createLogger, type AppLogger, type Logger } from './logger.ts';
 import { acquirePidLock } from './pid-lock.ts';
+import { Registration, REGISTER_USAGE } from './registration.ts';
 import { readInstanceSecrets } from './secrets.ts';
 
 export type StopSignal = 'SIGTERM' | 'SIGINT';
@@ -40,6 +43,8 @@ export interface Daemon {
   readonly scheduler: Scheduler;
   /** The Telegram surface; undefined when `secrets/antipod.env` has no `TELEGRAM_BOT_TOKEN` and no `telegramApi` was given. */
   readonly messenger: TelegramMessenger | undefined;
+  /** The one registration path (AD-10); `/register` jobs run through it. */
+  readonly registration: Registration;
   config(): Config;
   /** Re-reads `config.yaml`; keeps the previous config when it is invalid. Returns whether it applied. */
   reload(): boolean;
@@ -97,6 +102,9 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   let deadlines: Deadlines;
   let scheduler: Scheduler;
   let messenger: TelegramMessenger | undefined;
+  let registration: Registration;
+  /** `/register` jobs in flight; `stop()` waits for them before the database closes. */
+  const jobs = new Set<Promise<void>>();
   try {
     config = loadConfig(paths.config);
     logger.level = config.logging.level;
@@ -139,10 +147,40 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
         ...(options.timeZone === undefined ? {} : { timeZone: options.timeZone }),
       });
       messenger = telegram;
+      const telegramRegistration = new Registration({
+        store,
+        coordinator,
+        repo: new GitRepo({ dataDir: paths.data, secretsDir: paths.secrets, log: logger }),
+        checkChat: (chatId) => telegram.checkChat(chatId),
+        log: logger,
+      });
+      registration = telegramRegistration;
+      // The handler only checks the argument and returns (handler contract); the job ends with one reply.
+      telegram.registerCommand(REGISTER_COMMAND, (input) => {
+        if (input.args === '') {
+          telegram.replyRegistration(input.chatId, input.messageId, { ok: false, reason: REGISTER_USAGE });
+          return;
+        }
+        const job: Promise<void> = telegramRegistration
+          .register({ repo: input.args, chatId: input.chatId })
+          .then((result) => telegram.replyRegistration(input.chatId, input.messageId, result))
+          .catch((error: unknown) => {
+            logger.error({ event: 'registration_reply_failed', chat_id: input.chatId, ...errorFields(error) }, 'registration_reply_failed');
+          })
+          .finally(() => jobs.delete(job));
+        jobs.add(job);
+      });
       executor.register('notify', (effect, row) => telegram.notify(effect, row));
       executor.register('back_online', (effect, row) => telegram.backOnline(effect, row));
       executor.register('retire_card', (effect, row) => telegram.retireCard(effect, row));
     }
+    registration ??= new Registration({
+      store,
+      coordinator,
+      repo: new GitRepo({ dataDir: paths.data, secretsDir: paths.secrets, log: logger }),
+      checkChat: async () => 'Telegram is not configured',
+      log: logger,
+    });
     deadlines = new Deadlines(clock, undefined, logger);
     scheduler = new Scheduler({
       store,
@@ -215,6 +253,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     deadlines,
     scheduler,
     messenger,
+    registration,
     tick: onTick,
     config: () => config,
     reload() {
@@ -233,7 +272,11 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     stop(reason) {
       stopped ??= (async () => {
         clearInterval(tick);
-        // No new Owner input and no sends in flight; unsent rows are resent at next boot (AD-18).
+        // No new Owner input; running registrations finish and queue their replies; then no sends in
+        // flight. Unsent rows are resent at next boot (AD-18).
+        await messenger?.poller.stop();
+        await Promise.allSettled([...jobs]);
+        await registration.idle();
         await messenger?.stop();
         await scheduler.idle();
         // Let queued transactions and the drain in flight finish before the database closes; nothing new

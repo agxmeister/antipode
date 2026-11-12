@@ -42,3 +42,13 @@ export class DatabaseNewerThanCodeError extends AntipodError {
     this.codeVersion = codeVersion;
   }
 }
+
+/** A git remote could not be cloned or fetched; `detail` is the first meaningful line git printed. */
+export class RepoUnreachableError extends AntipodError {
+  readonly detail: string;
+
+  constructor(detail: string, options?: { cause?: unknown }) {
+    super('repo_unreachable', `repo not reachable: ${detail}`, options);
+    this.detail = detail;
+  }
+}

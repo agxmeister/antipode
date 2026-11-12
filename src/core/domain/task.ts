@@ -62,9 +62,16 @@ export const projectSchema = z.object({
   paused_at: isoTimestamp.nullable(),
   /** The Telegram supergroup bound by `/register` (AD-10); null until bound. */
   telegram_chat_id: z.int().nullable(),
+  /** The remote the Project was registered from (AD-5); unique, null only for Projects made outside registration. */
+  repo_url: z.string().min(1).nullable(),
   created_at: isoTimestamp,
 });
 export type Project = z.infer<typeof projectSchema>;
+
+/** A Project's name as Owner-facing copy shows it: the Recipe `name` with its first letter upper-cased. */
+export function projectDisplayName(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
 
 /** One row of `tasks`: the current state of a Task. Events are history, never replayed (AD-3). */
 export const taskSchema = z.object({

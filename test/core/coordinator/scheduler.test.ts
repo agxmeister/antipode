@@ -78,7 +78,7 @@ function setup(limits: Partial<SchedulerPolicy['limits']> = {}, usage: Partial<S
   };
 
   const project = (name: string, paused = false): Project => {
-    const p: Project = { id: ulid(), name, paused_at: paused ? clock.now().toISOString() : null, telegram_chat_id: null, created_at: clock.now().toISOString() };
+    const p: Project = { id: ulid(), name, paused_at: paused ? clock.now().toISOString() : null, telegram_chat_id: null, repo_url: null, created_at: clock.now().toISOString() };
     ts.store.insertProject(p);
     return p;
   };

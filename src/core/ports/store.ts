@@ -15,6 +15,9 @@ export interface Store {
   insertProject(project: Project): void;
   getProject(id: string): Project | undefined;
   listProjects(): Project[];
+  /** The Project registered from `repoUrl` (as `Repo.remoteUrl` resolved it). */
+  projectByRepo(repoUrl: string): Project | undefined;
+  projectByName(name: string): Project | undefined;
   /** Projects with at least one Task in `ACTIVE_STATES`. */
   activeProjects(): Project[];
 

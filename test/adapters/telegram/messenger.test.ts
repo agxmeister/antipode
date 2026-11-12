@@ -139,3 +139,55 @@ describe('TelegramMessenger.backOnline', () => {
     ]);
   });
 });
+
+describe('TelegramMessenger.checkChat (AD-10)', () => {
+  const supergroup = (payload: Record<string, unknown>) => ({ id: payload['chat_id'], type: 'supergroup', title: 'Antipode · Training' });
+  const me = (canRead: boolean) => () => ({ id: 9, is_bot: true, first_name: 'Antipode', username: 'antipode_bot', can_read_all_group_messages: canRead });
+
+  it('accepts a supergroup when privacy mode is off', async () => {
+    const h = harness();
+    h.tg.respond('getChat', supergroup);
+    h.tg.respond('getMe', me(true));
+    expect(await h.messenger.checkChat(CHAT_ID)).toBeUndefined();
+    expect(h.tg.callsOf('getChatMember')).toEqual([]);
+  });
+
+  it('accepts a supergroup in which the bot is an admin despite privacy mode', async () => {
+    const h = harness();
+    h.tg.respond('getChat', supergroup);
+    h.tg.respond('getMe', me(false));
+    h.tg.respond('getChatMember', () => ({ status: 'administrator', user: { id: 9, is_bot: true, first_name: 'Antipode' } }));
+    expect(await h.messenger.checkChat(CHAT_ID)).toBeUndefined();
+    expect(h.tg.callsOf('getChatMember')).toEqual([{ chat_id: CHAT_ID, user_id: 9 }]);
+  });
+
+  it("refuses a private chat or basic group, and a group the bot can't read", async () => {
+    const h = harness();
+    h.tg.respond('getChat', (payload) => ({ id: payload['chat_id'], type: 'group', title: 'basic' }));
+    expect(await h.messenger.checkChat(CHAT_ID)).toBe('this chat is not a supergroup');
+    h.tg.respond('getChat', (payload) => ({ id: payload['chat_id'], type: 'private', first_name: 'Owner' }));
+    expect(await h.messenger.checkChat(CHAT_ID)).toBe('this chat is not a supergroup');
+    h.tg.respond('getChat', supergroup);
+    h.tg.respond('getMe', me(false));
+    h.tg.respond('getChatMember', () => ({ status: 'member', user: { id: 9, is_bot: true, first_name: 'Antipode' } }));
+    expect(await h.messenger.checkChat(CHAT_ID)).toBe("the bot can't read all messages here: make it an admin or turn off privacy mode");
+  });
+});
+
+describe('TelegramMessenger.replyRegistration', () => {
+  it('replies silently on success and loudly on failure, to the /register message', async () => {
+    const h = harness();
+    h.messenger.replyRegistration(CHAT_ID, 5, { ok: true, name: 'Training' });
+    h.messenger.replyRegistration(CHAT_ID, 6, { ok: false, reason: 'Recipe contains a secret value (line 14)' });
+    await h.settle();
+    expect(h.ts.store.outboxOfChat(CHAT_ID).map((r) => r.kind)).toEqual(['registration_reply', 'registration_failed']);
+    expect(h.tg.callsOf('sendMessage')).toEqual([
+      expect.objectContaining({ text: 'Training registered', disable_notification: true, reply_parameters: { message_id: 5, allow_sending_without_reply: true } }),
+      expect.objectContaining({
+        text: "❌ Can't register: Recipe contains a secret value (line 14)",
+        disable_notification: false,
+        reply_parameters: { message_id: 6, allow_sending_without_reply: true },
+      }),
+    ]);
+  });
+});

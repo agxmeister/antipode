@@ -6,7 +6,7 @@ import type { Clock } from '../../core/ports/clock.ts';
 import { silentLog, type Log } from '../../core/ports/log.ts';
 import type { Store } from '../../core/ports/store.ts';
 import { backoffMs } from './sender.ts';
-import { escapeHtml, textMessage } from './cards/card.ts';
+import { clip, escapeHtml, textMessage } from './cards/card.ts';
 
 /** `getUpdates` long-poll timeout in seconds. */
 export const POLL_TIMEOUT_S = 30;
@@ -16,6 +16,10 @@ export const STALE_TAP_TOAST = 'This Review was replaced by a newer one.';
 export const ACK_REACTION = '👀';
 /** The only command an unbound chat dispatches (AD-10). */
 export const REGISTER_COMMAND = 'register';
+/** Prefix of the reply when a command or text handler throws (Owner decision 2026-11-12). */
+export const HANDLER_FAILED = "❌ Couldn't handle that: ";
+/** A failure reason is clipped to this many characters so the reply stays inside Telegram's limit. */
+const REASON_LIMIT = 1_000;
 
 /** An Owner message as handlers see it. */
 export interface InboundMessage {
@@ -87,6 +91,8 @@ export interface PollerOptions {
   config: () => { ownerId: number; staleAfterMs: number };
   /** Persists an outbox reply and wakes the sender. */
   enqueue: (chatId: number, drafts: ReturnType<typeof textMessage>[]) => void;
+  /** Replaces `👀` with `❌` on the Owner message and replies `text`; called when a handler throws. */
+  failAck?: (chatId: number, messageId: number, text: string) => Promise<void>;
   log?: Log;
   /** Waits `ms` or until `signal` aborts; tests pass a fake. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -139,6 +145,7 @@ export class Poller {
   readonly #clock: Clock;
   readonly #config: PollerOptions['config'];
   readonly #enqueue: PollerOptions['enqueue'];
+  readonly #failAck: NonNullable<PollerOptions['failAck']> | undefined;
   readonly #log: Log;
   readonly #sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   readonly #callbackAnswerMs: number;
@@ -156,6 +163,7 @@ export class Poller {
     this.#clock = options.clock;
     this.#config = options.config;
     this.#enqueue = options.enqueue;
+    this.#failAck = options.failAck;
     this.#log = options.log ?? silentLog;
     this.#sleep = options.sleep ?? abortableSleep;
     this.#callbackAnswerMs = options.callbackAnswerMs ?? CALLBACK_ANSWER_MS;
@@ -258,16 +266,26 @@ export class Poller {
       replyTo: reply === undefined ? undefined : this.#store.getTelegramMessage(chatId, reply.message_id),
       stale: message.date * 1_000 < this.#clock.now().getTime() - this.#config().staleAfterMs,
     };
-    if (parsed !== undefined) {
-      const handler = this.commands.get(parsed.command);
-      if (handler === undefined) {
-        this.#log.info({ event: 'telegram_command_unknown', command: parsed.command, project_id: project?.id }, 'telegram_command_unknown');
+    try {
+      if (parsed !== undefined) {
+        const handler = this.commands.get(parsed.command);
+        if (handler === undefined) {
+          this.#log.info({ event: 'telegram_command_unknown', command: parsed.command, project_id: project?.id }, 'telegram_command_unknown');
+          return;
+        }
+        await handler({ ...input, ...parsed });
         return;
       }
-      await handler({ ...input, ...parsed });
-      return;
+      await this.#text?.(input);
+    } catch (error) {
+      // One central catch (Owner decision 2026-11-12): a failed handler reaches the Owner, not only the log.
+      const reason = errorText(error);
+      this.#log.error(
+        { event: 'telegram_handler_failed', command: parsed?.command, project_id: project?.id, chat_id: chatId, error: reason },
+        'telegram_handler_failed',
+      );
+      await this.#failAck?.(chatId, message.message_id, `${HANDLER_FAILED}${clip(reason, REASON_LIMIT)}`);
     }
-    await this.#text?.(input);
   }
 
   /** `👀` before any processing (NFR-6); a failure is logged and processing continues. */

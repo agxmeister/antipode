@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TelegramMessenger } from '../../../src/adapters/telegram/messenger.ts';
 import { parseCommand, Poller, STALE_TAP_TOAST, type CallbackCommand, type CommandInput, type InboundMessage } from '../../../src/adapters/telegram/poller.ts';
 import { ulid } from '../../../src/core/domain/ids.ts';
 import { LAST_UPDATE_ID_SETTING, type OutboxDraft } from '../../../src/core/domain/telegram.ts';
@@ -310,5 +311,74 @@ describe('Poller: loop', () => {
     await vi.waitFor(() => expect(h.tg.callsOf('getUpdates').length).toBeGreaterThanOrEqual(3));
     await h.poller.stop();
     expect(h.sleeps).toEqual([1_000, 2_000]);
+  });
+});
+
+describe('Poller: handler failures reach the Owner (Owner decision 2026-11-12)', () => {
+  function withFailAck() {
+    const ts = openTestStore();
+    open.push(ts);
+    const tg = fakeTelegram();
+    const acks: Array<{ chatId: number; messageId: number; text: string }> = [];
+    const poller = new Poller({
+      api: tg.api,
+      store: ts.store,
+      clock: fakeClock(),
+      config: () => ({ ownerId: OWNER_ID, staleAfterMs: 300_000 }),
+      enqueue: () => {},
+      failAck: async (chatId, messageId, text) => {
+        acks.push({ chatId, messageId, text });
+      },
+    });
+    pollers.push(poller);
+    return { ts, tg, poller, acks };
+  }
+
+  it('a throwing command handler gets failAck with the reason, and the offset still advances', async () => {
+    const h = withFailAck();
+    insertProject(h.ts.store, CHAT_ID);
+    h.poller.commands.set('status', () => {
+      throw new Error('database is locked');
+    });
+    await h.poller.handleUpdate(textUpdate(20, '/status', { messageId: 600 }));
+    expect(h.acks).toEqual([{ chatId: CHAT_ID, messageId: 600, text: "❌ Couldn't handle that: database is locked" }]);
+    expect(h.ts.store.getSetting(LAST_UPDATE_ID_SETTING)).toBe('20');
+  });
+
+  it('a rejecting text handler gets failAck too', async () => {
+    const h = withFailAck();
+    insertProject(h.ts.store, CHAT_ID);
+    h.poller.onText(async () => {
+      throw new Error('intake unavailable');
+    });
+    await h.poller.handleUpdate(textUpdate(21, 'add a rest timer', { messageId: 601 }));
+    expect(h.acks).toEqual([{ chatId: CHAT_ID, messageId: 601, text: "❌ Couldn't handle that: intake unavailable" }]);
+  });
+
+  it('through the messenger: ❌ reaction (a refusal is only logged) and the reply still goes out', async () => {
+    const ts = openTestStore();
+    open.push(ts);
+    const tg = fakeTelegram();
+    const messenger = new TelegramMessenger({
+      api: tg.api,
+      store: ts.store,
+      clock: fakeClock(),
+      config: () => ({ ownerId: OWNER_ID, staleAfterMs: 300_000, outboxRetries: 2 }),
+      setTimer: () => ({ cancel() {} }),
+    });
+    messenger.sender.start();
+    insertProject(ts.store, CHAT_ID);
+    messenger.registerCommand('status', () => {
+      throw new Error('boom <now>');
+    });
+    tg.fail('setMessageReaction', { error_code: 400, description: 'Bad Request: REACTION_INVALID' });
+    tg.fail('setMessageReaction', { error_code: 400, description: 'Bad Request: REACTION_INVALID' });
+    await messenger.poller.handleUpdate(textUpdate(22, '/status', { messageId: 602 }));
+    await messenger.sender.idle();
+    await messenger.stop();
+    expect(tg.callsOf('setMessageReaction').map((call) => call['reaction'])).toEqual([[{ type: 'emoji', emoji: '👀' }], [{ type: 'emoji', emoji: '❌' }]]);
+    expect(tg.callsOf('sendMessage')).toEqual([
+      expect.objectContaining({ text: "❌ Couldn't handle that: boom &lt;now&gt;", reply_parameters: { message_id: 602, allow_sending_without_reply: true } }),
+    ]);
   });
 });

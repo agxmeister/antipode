@@ -9,6 +9,7 @@ import type { Store } from '../../core/ports/store.ts';
 import { backOnlineCard } from './cards/back-online.ts';
 import { escapeHtml, NO_KEYBOARD, textMessage, type CardEnv } from './cards/card.ts';
 import { defaultNotices, type NoticeRenderer } from './cards/index.ts';
+import { registrationFailedCard, registrationReplyCard } from './cards/registration.ts';
 import { Poller, type CallbackCommand, type CommandHandler, type TextHandler } from './poller.ts';
 import { OutboxSender } from './sender.ts';
 
@@ -58,6 +59,35 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export const NOT_SUPERGROUP = 'this chat is not a supergroup';
+export const CANT_READ = "the bot can't read all messages here: make it an admin or turn off privacy mode";
+
+/**
+ * Whether `/register` may bind `chatId` (AD-10): it must be a supergroup in which the bot reads every
+ * message, because privacy mode is off (`getMe().can_read_all_group_messages`) or the bot is an admin.
+ * Resolves the refusal reason, or undefined when the chat qualifies.
+ */
+export async function checkChat(api: Api, chatId: number): Promise<string | undefined> {
+  let chat;
+  try {
+    chat = await api.getChat(chatId);
+  } catch (error) {
+    return `can't open this chat: ${errorText(error)}`;
+  }
+  if (chat.type !== 'supergroup') {
+    return NOT_SUPERGROUP;
+  }
+  const me = await api.getMe();
+  if (me.can_read_all_group_messages) {
+    return undefined;
+  }
+  const member = await api.getChatMember(chatId, me.id);
+  return member.status === 'administrator' || member.status === 'creator' ? undefined : CANT_READ;
+}
+
+/** How a registration ended, as the reply shows it. */
+export type RegistrationOutcome = { ok: true; name: string } | { ok: false; reason: string };
+
 /**
  * The `telegram` adapter (AD-10) behind the `Messenger` port: an outbox sender, a long-polling
  * receiver, the card templates, and the registries later stories fill with command, callback and
@@ -93,6 +123,7 @@ export class TelegramMessenger implements Messenger {
       clock: options.clock,
       config: () => ({ ownerId: options.config().ownerId, staleAfterMs: options.config().staleAfterMs }),
       enqueue: (chatId, drafts) => this.enqueue(chatId, drafts, null),
+      failAck: (chatId, messageId, text) => this.failAck(chatId, messageId, text),
       log: this.#log,
       ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
     });
@@ -194,6 +225,19 @@ export class TelegramMessenger implements Messenger {
       payload: { method: 'editMessageReplyMarkup', params: { reply_markup: NO_KEYBOARD } },
     };
     this.enqueue(card.chat_id, [edit], row.effect_id);
+  }
+
+  /** `checkChat` through this adapter's `Api`. */
+  checkChat(chatId: number): Promise<string | undefined> {
+    return checkChat(this.#api, chatId);
+  }
+
+  /** The Registration reply to a `/register` message: silent on success, loud `registration_failed` otherwise. */
+  replyRegistration(chatId: number, messageId: number | undefined, outcome: RegistrationOutcome): void {
+    const drafts = outcome.ok
+      ? registrationReplyCard.render({ name: outcome.name, reply_to: messageId }, this.#env)
+      : registrationFailedCard.render({ reason: outcome.reason, reply_to: messageId }, this.#env);
+    this.enqueue(chatId, drafts, null);
   }
 
   async failAck(chatId: number, messageId: number, text: string): Promise<void> {

@@ -111,6 +111,8 @@ export class SqliteStore implements Store {
     insertProject: Statement;
     getProject: Statement;
     listProjects: Statement;
+    projectByRepo: Statement;
+    projectByName: Statement;
     activeProjects: Statement;
     insertTask: Statement;
     getTask: Statement;
@@ -156,9 +158,11 @@ export class SqliteStore implements Store {
   constructor(db: SqliteDatabase) {
     this.#db = db;
     this.#stmt = {
-      insertProject: db.prepare(insertSql('projects', ['id', 'name', 'paused_at', 'telegram_chat_id', 'created_at'])),
+      insertProject: db.prepare(insertSql('projects', ['id', 'name', 'paused_at', 'telegram_chat_id', 'repo_url', 'created_at'])),
       getProject: db.prepare('SELECT * FROM projects WHERE id = ?'),
       listProjects: db.prepare('SELECT * FROM projects ORDER BY created_at, id'),
+      projectByRepo: db.prepare('SELECT * FROM projects WHERE repo_url = ?'),
+      projectByName: db.prepare('SELECT * FROM projects WHERE name = ?'),
       activeProjects: db.prepare(
         `SELECT DISTINCT p.* FROM projects p JOIN tasks t ON t.project_id = p.id
          WHERE t.state IN (${placeholders(ACTIVE_STATES.length)}) ORDER BY p.created_at, p.id`,
@@ -254,6 +258,16 @@ export class SqliteStore implements Store {
 
   listProjects(): Project[] {
     return this.#stmt.listProjects.all().map((row) => projectSchema.parse(row));
+  }
+
+  projectByRepo(repoUrl: string): Project | undefined {
+    const row = this.#stmt.projectByRepo.get(repoUrl);
+    return row === undefined ? undefined : projectSchema.parse(row);
+  }
+
+  projectByName(name: string): Project | undefined {
+    const row = this.#stmt.projectByName.get(name);
+    return row === undefined ? undefined : projectSchema.parse(row);
   }
 
   activeProjects(): Project[] {

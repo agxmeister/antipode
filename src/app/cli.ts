@@ -3,8 +3,14 @@ import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { Api } from 'grammy';
+import { GitRepo } from '../adapters/git/repo.ts';
 import { openDatabase } from '../adapters/sqlite/db.ts';
 import { migrate } from '../adapters/sqlite/migrate.ts';
+import { SqliteStore } from '../adapters/sqlite/store.ts';
+import { checkChat } from '../adapters/telegram/messenger.ts';
+import { Coordinator } from '../core/coordinator/coordinator.ts';
+import { systemClock } from './clock.ts';
 import { loadConfig } from './config.ts';
 import { runDaemon } from './daemon.ts';
 import { ensureHome, resolveHome } from './home.ts';
@@ -12,6 +18,8 @@ import { backup } from './ops/backup.ts';
 import { spawnCommand, type CommandRunner } from './ops/command.ts';
 import { plistFor } from './ops/plist.ts';
 import { upgrade } from './ops/upgrade.ts';
+import { Registration } from './registration.ts';
+import { readInstanceSecrets } from './secrets.ts';
 
 /** The package root: two levels above this file (`dist/app/cli.js` or `src/app/cli.ts`). */
 export const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
@@ -24,6 +32,8 @@ Commands:
   upgrade   Pull, install, build, migrate and restart the launchd agent
   plist     Print the launchd agent plist for this instance
   migrate   Apply pending database migrations
+  register <repo> --chat-id <id>
+            Register a repo and bind it to a Telegram supergroup (fallback for /register)
 
 The instance is selected by ANTIPOD_HOME (default ~/.antipod).`;
 
@@ -32,6 +42,8 @@ export interface CliDeps {
   out: (line: string) => void;
   err: (line: string) => void;
   run: CommandRunner;
+  /** The Bot API used to check the chat on `register`; built from `TELEGRAM_BOT_TOKEN` when absent. Tests pass a fake (AD-24). */
+  telegramApi?: Api;
 }
 
 const defaultDeps = (): CliDeps => ({
@@ -45,14 +57,29 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** `--chat-id -100123` → `--chat-id=-100123`: supergroup ids are negative, and parseArgs reads a leading dash as an option. */
+function joinNegativeChatId(argv: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const next = argv[i + 1];
+    if (argv[i] === '--chat-id' && next !== undefined && /^-\d+$/.test(next)) {
+      out.push(`--chat-id=${next}`);
+      i += 1;
+    } else {
+      out.push(argv[i]!);
+    }
+  }
+  return out;
+}
+
 /** Runs one CLI invocation and resolves its exit code. */
 export async function main(argv: readonly string[], deps: CliDeps = defaultDeps()): Promise<number> {
   let parsed;
   try {
     parsed = parseArgs({
-      args: [...argv],
+      args: joinNegativeChatId(argv),
       allowPositionals: true,
-      options: { help: { type: 'boolean', short: 'h' } },
+      options: { help: { type: 'boolean', short: 'h' }, 'chat-id': { type: 'string' } },
     });
   } catch (error) {
     deps.err(`antipod: ${message(error)}`);
@@ -63,6 +90,19 @@ export async function main(argv: readonly string[], deps: CliDeps = defaultDeps(
   if (parsed.values.help === true || command === undefined || command === 'help') {
     deps.out(USAGE);
     return command === undefined && parsed.values.help !== true ? 2 : 0;
+  }
+  const chatIdOption = parsed.values['chat-id'];
+  if (command === 'register') {
+    const chatId = chatIdOption === undefined ? Number.NaN : Number(chatIdOption);
+    if (rest.length !== 1 || !Number.isSafeInteger(chatId)) {
+      deps.err('Usage: antipod register <repo> --chat-id <id>');
+      return 2;
+    }
+    return registerCommand(rest[0]!, chatId, deps);
+  }
+  if (chatIdOption !== undefined) {
+    deps.err(`antipod ${command}: unexpected option --chat-id`);
+    return 2;
   }
   if (rest.length > 0) {
     deps.err(`antipod ${command}: unexpected arguments: ${rest.join(' ')}`);
@@ -120,6 +160,52 @@ export async function main(argv: readonly string[], deps: CliDeps = defaultDeps(
     deps.err(`antipod ${command}: ${message(error)}`);
     return 1;
   }
+}
+
+/**
+ * `antipod register <repo> --chat-id <id>`: the same registration as `/register` (AD-10), writing the
+ * rows itself, so it works with or without the daemon running. The result goes to stdout; nothing is
+ * sent to the group.
+ */
+async function registerCommand(repo: string, chatId: number, deps: CliDeps): Promise<number> {
+  try {
+    const paths = ensureHome(resolveHome(deps.env));
+    const config = loadConfig(paths.config);
+    const api = deps.telegramApi ?? apiFromSecrets(paths.secrets);
+    if (api === undefined) {
+      deps.err('antipod register: no TELEGRAM_BOT_TOKEN in secrets/antipod.env, so the chat cannot be checked');
+      return 1;
+    }
+    const db = openDatabase(paths.database);
+    try {
+      migrate(db);
+      const store = new SqliteStore(db);
+      const coordinator = new Coordinator({ store, clock: systemClock, policy: () => ({ limits: config.limits, roles: config.roles }) });
+      const registration = new Registration({
+        store,
+        coordinator,
+        repo: new GitRepo({ dataDir: paths.data, secretsDir: paths.secrets }),
+        checkChat: (id) => checkChat(api, id),
+      });
+      const result = await registration.register({ repo, chatId });
+      if (result.ok) {
+        deps.out(`antipod register: ${result.name} registered`);
+        return 0;
+      }
+      deps.out(`antipod register: Can't register: ${result.reason}`);
+      return 1;
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    deps.err(`antipod register: ${message(error)}`);
+    return 1;
+  }
+}
+
+function apiFromSecrets(secretsDir: string): Api | undefined {
+  const token = readInstanceSecrets(secretsDir)['TELEGRAM_BOT_TOKEN'];
+  return token === undefined || token === '' ? undefined : new Api(token);
 }
 
 function invokedDirectly(): boolean {

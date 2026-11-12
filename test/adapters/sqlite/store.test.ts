@@ -20,7 +20,7 @@ function setup() {
 }
 
 function project(name: string): Project {
-  return { id: ulid(), name, paused_at: null, telegram_chat_id: null, created_at: NOW };
+  return { id: ulid(), name, paused_at: null, telegram_chat_id: null, repo_url: null, created_at: NOW };
 }
 
 function task(projectId: string, overrides: Partial<Task> = {}): Task {
@@ -93,6 +93,19 @@ describe('SqliteStore', () => {
     expect(ts.store.tasksInStates(['queued'])).toHaveLength(1);
     expect(ts.store.tasksInStates(['draft'])).toEqual([]);
     expect(ts.store.tasksInStates([])).toEqual([]);
+  });
+
+  it('finds Projects by repo_url and by name; repo_url is unique, NULLs allowed', () => {
+    const ts = setup();
+    const a = { ...project('alpha'), repo_url: 'git@github.com:a/alpha.git' };
+    ts.store.insertProject(a);
+    ts.store.insertProject(project('beta'));
+    ts.store.insertProject(project('gamma'));
+    expect(ts.store.projectByRepo('git@github.com:a/alpha.git')).toEqual(a);
+    expect(ts.store.projectByRepo('git@github.com:a/other.git')).toBeUndefined();
+    expect(ts.store.projectByName('beta')?.repo_url).toBeNull();
+    expect(ts.store.projectByName('delta')).toBeUndefined();
+    expect(() => ts.store.insertProject({ ...project('epsilon'), repo_url: a.repo_url })).toThrow(/UNIQUE/);
   });
 
   it('refuses a patch outside the patchable columns and a patch of a missing row', () => {
