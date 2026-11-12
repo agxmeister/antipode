@@ -33,3 +33,6 @@
 - source_spec: `docs/implementation-artifacts/spec-1-4-telegram-adapter.md`
   summary: Test that a `notify` with an unregistered `notice_kind` marks its effect `failed` and queues nothing, and decide whether the Owner should see it.
   evidence: low today, since only the two usage-window kinds are emitted and both have templates. Settle in the first story that emits a new kind (1-11/1-14) (review pass 1, #8).
+- source_spec: `docs/implementation-artifacts/spec-1-4-telegram-adapter.md`
+  summary: A command or text handler that throws must still give the Owner a reply: catch in the handler and queue an `outbox` notice (and `failAck`), or add one central catch in `Poller.#onMessage` that does it for every handler.
+  evidence: medium. `Poller.handleUpdate` (`src/adapters/telegram/poller.ts:228`) logs `telegram_update_failed` and advances `telegram.last_update_id`, so the Owner's message is consumed with only `👀` and no reply, against AGENTS.md's rule that a failure the Owner must see becomes an `outbox` notice. Settle in the first story that registers a handler (1-5 `/register`, then 1-8 Intake, 1-15 commands). Raised in the story 1-4 walkthrough detail pass; Owner chose to carry it forward.
