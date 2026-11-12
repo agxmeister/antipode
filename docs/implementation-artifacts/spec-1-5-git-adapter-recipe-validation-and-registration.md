@@ -2,7 +2,7 @@
 title: 'Git adapter, Recipe validation and registration'
 type: 'feature'
 created: '2026-11-12'
-status: 'in-review'
+status: 'done'
 baseline_commit: '9ee287b31224af159f1ecfe2122a782d002c53bb'
 route: 'dispatch'
 review_loop_iteration: 0
