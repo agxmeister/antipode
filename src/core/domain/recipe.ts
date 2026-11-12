@@ -78,7 +78,7 @@ export const recipeSchema = z
     steps: z.record(z.string().regex(STEP_NAME, 'must be a step name like build'), recipeStepSchema, { error: 'must be a mapping of steps' }),
   })
   .superRefine((recipe, ctx) => {
-    if (recipe.demo !== null && !(recipe.demo.step in recipe.steps)) {
+    if (recipe.demo !== null && !Object.hasOwn(recipe.steps, recipe.demo.step)) {
       ctx.addIssue({ code: 'custom', path: ['demo', 'step'], message: "must name one of the steps" });
     }
   });

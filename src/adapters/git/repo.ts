@@ -15,6 +15,8 @@ export const DEPLOY_KEY = 'id_antipod';
 export const MAIN_CHECKOUT = '_main';
 
 const MAX_BUFFER = 64 * 1024 * 1024;
+/** A git call running longer than this is killed, so a hung clone or fetch never blocks registration or shutdown. */
+export const GIT_TIMEOUT_MS = 10 * 60_000;
 
 export interface GitRepoOptions {
   /** `$ANTIPOD_HOME/data`: clones go to `repos/`, worktrees to `worktrees/` (AD-5). */
@@ -22,6 +24,8 @@ export interface GitRepoOptions {
   /** `$ANTIPOD_HOME/secrets`, where `id_antipod` may live. */
   secretsDir: string;
   log?: Log;
+  /** Defaults to `GIT_TIMEOUT_MS`; tests shorten it. */
+  timeoutMs?: number;
 }
 
 /** `host/owner/repo` → `git@host:owner/repo.git`; a scheme, `git@` or an absolute path is used as given. */
@@ -59,11 +63,13 @@ export function firstErrorLine(stderr: string): string {
 class GitError extends Error {
   readonly stderr: string;
   readonly exitCode: number | string | undefined;
+  readonly timedOut: boolean;
 
-  constructor(args: readonly string[], stderr: string, exitCode: number | string | undefined) {
-    super(`git ${args.join(' ')} failed: ${firstErrorLine(stderr)}`);
+  constructor(args: readonly string[], stderr: string, exitCode: number | string | undefined, timedOut = false) {
+    super(`git ${args.join(' ')} failed: ${timedOut ? 'git timed out' : firstErrorLine(stderr)}`);
     this.stderr = stderr;
     this.exitCode = exitCode;
+    this.timedOut = timedOut;
   }
 }
 
@@ -77,8 +83,10 @@ export class GitRepo implements Repo {
   readonly #worktreesDir: string;
   readonly #secretsDir: string;
   readonly #log: Log;
+  readonly #timeoutMs: number;
 
   constructor(options: GitRepoOptions) {
+    this.#timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
     this.#reposDir = join(options.dataDir, 'repos');
     this.#worktreesDir = join(options.dataDir, 'worktrees');
     this.#secretsDir = options.secretsDir;
@@ -139,8 +147,9 @@ export class GitRepo implements Repo {
     const listing = (await this.#git(['--git-dir', dir, 'ls-tree', sha, '--', path])).trim();
     // `<mode> <type> <object>\t<path>`; a directory or submodule at `path` is not a file.
     const [meta] = listing.split('\t');
-    const [, type, object] = (meta ?? '').split(' ');
-    if (type !== 'blob' || object === undefined) return undefined;
+    const [mode, type, object] = (meta ?? '').split(' ');
+    // A symlink (120000) is a blob holding its target path, not the file.
+    if (type !== 'blob' || mode === '120000' || object === undefined) return undefined;
     return this.#git(['--git-dir', dir, 'cat-file', 'blob', object]);
   }
 
@@ -202,6 +211,8 @@ export class GitRepo implements Repo {
     const path = join(this.worktreesDir(name), String(taskNo));
     if (await this.#isWorktree(name, path)) return path;
     const branch = `antipod/${taskNo}-${slug}`;
+    // Anything else at the path (a stray directory) would make `worktree add` fail.
+    await rm(path, { recursive: true, force: true });
     await mkdir(this.worktreesDir(name), { recursive: true, mode: 0o700 });
     await this.#git(['--git-dir', dir, 'worktree', 'prune']);
     const exists = await this.#git(['--git-dir', dir, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).then(
@@ -237,9 +248,10 @@ export class GitRepo implements Repo {
 
   #git(args: readonly string[]): Promise<string> {
     return new Promise((resolve, reject) => {
-      execFile('git', [...args], { env: gitEnv(this.#secretsDir), maxBuffer: MAX_BUFFER, encoding: 'utf8' }, (error, stdout, stderr) => {
+      const options = { env: gitEnv(this.#secretsDir), maxBuffer: MAX_BUFFER, encoding: 'utf8' as const, timeout: this.#timeoutMs, killSignal: 'SIGKILL' as const };
+      execFile('git', [...args], options, (error, stdout, stderr) => {
         if (error !== null) {
-          reject(new GitError(args, stderr, error.code ?? undefined));
+          reject(new GitError(args, stderr, error.code ?? undefined, error.killed === true && error.signal === 'SIGKILL'));
           return;
         }
         resolve(stdout);
@@ -249,6 +261,6 @@ export class GitRepo implements Repo {
 }
 
 function unreachable(error: unknown): Error {
-  if (error instanceof GitError) return new RepoUnreachableError(firstErrorLine(error.stderr), { cause: error });
+  if (error instanceof GitError) return new RepoUnreachableError(error.timedOut ? 'git timed out' : firstErrorLine(error.stderr), { cause: error });
   return error instanceof Error ? error : new Error(String(error));
 }

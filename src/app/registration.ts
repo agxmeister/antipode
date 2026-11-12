@@ -86,6 +86,8 @@ export class Registration {
     if (input.repo.trim() === '') {
       return { ok: false, reason: REGISTER_USAGE };
     }
+    // A crashed registration's staging clone goes now (design note: deleted at the next registration).
+    await this.#repo.removeStaging();
     const chatRefusal = await this.#checkChat(input.chatId);
     if (chatRefusal !== undefined) {
       return { ok: false, reason: chatRefusal };
@@ -100,8 +102,6 @@ export class Registration {
       return { ok: false, reason: `${projectDisplayName(known.name)} is already registered in another group` };
     }
 
-    // A crashed registration's staging clone goes now (design note: deleted at the next registration).
-    await this.#repo.removeStaging();
     return known === undefined ? this.#registerNew(url, input.chatId) : this.#reregister(known, input.chatId);
   }
 
@@ -140,8 +140,10 @@ export class Registration {
     try {
       await this.#repo.fetch(project.name);
     } catch (error) {
-      if (error instanceof RepoUnreachableError) return { ok: false, reason: error.message };
-      throw error;
+      if (!(error instanceof RepoUnreachableError)) throw error;
+      // The clone may be missing or broken (data dir wiped, or discarded after a failed bind): clone afresh.
+      const recloned = await this.#reclone(project);
+      if (recloned !== undefined) return recloned;
     }
     const recipe = await this.#readRecipe(project.name);
     if (!recipe.ok) return recipe;
@@ -158,6 +160,21 @@ export class Registration {
       this.#store.bindProjectChat(project.id, chatId);
     }
     return { ok: true, project: { ...project, telegram_chat_id: chatId }, name: projectDisplayName(project.name) };
+  }
+
+  /** Replaces the Project's clone with a fresh one; resolves a refusal only when that clone fails too. */
+  async #reclone(project: Project): Promise<RegisterResult | undefined> {
+    const staging = `${STAGING_PREFIX}${ulid()}`;
+    try {
+      await this.#repo.ensureClone(project.repo_url ?? '', staging);
+      await this.#repo.promote(staging, project.name);
+      return undefined;
+    } catch (error) {
+      if (error instanceof RepoUnreachableError) return { ok: false, reason: error.message };
+      throw error;
+    } finally {
+      await this.#repo.discard(staging);
+    }
   }
 
   /** The Recipe at `origin/main` of clone `name`, validated (AD-22). */

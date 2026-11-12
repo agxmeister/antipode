@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FETCH_REFSPEC, firstErrorLine, GitRepo, gitEnv, remoteUrl } from '../../../src/adapters/git/repo.ts';
 import { RepoUnreachableError } from '../../../src/core/domain/errors.ts';
 import { createTempRemote, git, validRecipe } from '../../helpers/git.ts';
@@ -44,6 +44,46 @@ describe('firstErrorLine', () => {
 });
 
 describe('GitRepo (temporary local remote, AD-24)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('kills a hung git and reports it as unreachable', async () => {
+    const bin = mkdtempSync(join(tmpdir(), 'antipod-fake-git-'));
+    writeFileSync(join(bin, 'git'), '#!/bin/sh\nsleep 30\n');
+    chmodSync(join(bin, 'git'), 0o755);
+    vi.stubEnv('PATH', `${bin}:${process.env['PATH'] ?? ''}`);
+    const root = mkdtempSync(join(tmpdir(), 'antipod-git-'));
+    const repo = new GitRepo({ dataDir: join(root, 'data'), secretsDir: join(root, 'secrets'), timeoutMs: 200 });
+    const error = await repo.ensureClone('/nowhere', '.incoming-t').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RepoUnreachableError);
+    expect((error as Error).message).toBe('repo not reachable: git timed out');
+  });
+
+  it('does not read a symlinked file as the file', async () => {
+    const remote = createTempRemote();
+    remote.commit({ 'real.yaml': validRecipe() });
+    symlinkSync('real.yaml', join(remote.dir, 'antipod.yaml'));
+    const sha = remote.commit({});
+    const { repo } = setup();
+    await repo.ensureClone(remote.dir, 'p');
+    expect(await repo.readFile('p', sha, 'real.yaml')).toBe(validRecipe());
+    expect(await repo.readFile('p', sha, 'antipod.yaml')).toBeUndefined();
+  });
+
+  it('adds a Task worktree over a stray plain directory at its path', async () => {
+    const remote = createTempRemote();
+    const base = remote.commit({ 'antipod.yaml': validRecipe() });
+    const { repo, data } = setup();
+    await repo.ensureClone(remote.dir, 'p');
+    const stray = join(data, 'worktrees', 'p', '7');
+    mkdirSync(stray, { recursive: true });
+    writeFileSync(join(stray, 'junk'), 'x');
+    expect(await repo.addTaskWorktree('p', 7, 'dark-mode', base)).toBe(stray);
+    expect(git(stray, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('antipod/7-dark-mode');
+    expect(existsSync(join(stray, 'junk'))).toBe(false);
+  });
+
   it('clones bare with the origin refspec, and reads the Recipe at origin/main', async () => {
     const remote = createTempRemote();
     const sha = remote.commit({ 'antipod.yaml': validRecipe() });

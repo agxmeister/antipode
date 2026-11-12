@@ -2,7 +2,7 @@
 title: 'Git adapter, Recipe validation and registration'
 type: 'feature'
 created: '2026-11-12'
-status: 'in-progress'
+status: 'in-review'
 baseline_commit: '9ee287b31224af159f1ecfe2122a782d002c53bb'
 route: 'dispatch'
 review_loop_iteration: 0
@@ -112,6 +112,37 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+Pass 1 (blind hunter BH, edge-case hunter ECH, verification gap VG):
+
+| # | Source | Finding | Verdict | Evidence | Route |
+|---|--------|---------|---------|----------|-------|
+| 1 | BH/ECH | git subprocesses have no timeout | medium | `#git` calls `execFile` without `timeout`; a hung clone blocks the per-process queue and `daemon.stop()` awaits it | patch |
+| 2 | BH/ECH/VG | A missing or broken clone of a known Project can never be re-registered; a failed bind after `createProject` discards the clone and leaves the row | medium | `#reregister` only fetches; `fetch` on a missing dir throws `RepoUnreachableError`. Fixed by re-cloning there, which also covers the bind-failure leftover | patch |
+| 3 | ECH | Refused registrations skip the staging sweep | low | `removeStaging()` runs after the chat and binding checks; a one-line move | patch |
+| 4 | BH/ECH | Symlinked `antipod.yaml` is read as its target path | low | `readFile` checks only `type === 'blob'`; mode `120000` is a blob | patch |
+| 5 | ECH | `addTaskWorktree` fails over a stray plain directory | low | Port says idempotent; `worktree add` refuses an existing non-empty path | patch |
+| 6 | ECH | `demo.step: toString` passes | low | `in` walks the prototype | patch |
+| 7 | ECH | `--chat-id=` becomes chat 0; hex and exponent accepted | low | `Number('')` is 0 | patch |
+| 8 | VG | One-at-a-time queue untested | medium | No test overlaps two `register()` calls | patch |
+| 9 | VG | Error-to-reason path and `getChat` failure untested | medium | Every harness `checkChat` resolves | patch |
+| 10 | VG/BH | Recipe-rename branch untested | medium | No test reaches `recipe.name !== project.name` | patch |
+| 11 | VG | Bad step-name key message untested | low | No `invalid_key` row | patch |
+| 12 | BH/ECH/VG | CLI and daemon registrations race across processes (sweep, promote, discard) | low | Real, but needs both at once while the CLI is a fallback for a dead Telegram; a cross-process lock adds a mechanism | reject |
+| 13 | BH/ECH/VG | One repo, many `repo_url` spellings; relative paths read as `host/owner/repo` | low | The mapping is the spec's (`as given` otherwise); the Owner types one form; canonicalizing adds rules | reject |
+| 14 | BH | ssh may prompt without a deploy key; unknown host fails with `BatchMode` | low | The daemon has no TTY so ssh fails with a visible reason; `known_hosts` is the Owner's own; `accept-new` is a security choice | reject |
+| 15 | BH | Credentials in an https URL echo into the reply and logs | low | AD-14 uses the deploy key; the Owner typed the URL into their own group | reject |
+| 16 | BH | Project with NULL `repo_url` can't be adopted | false | No production path creates one; only tests do | reject |
+| 17 | BH | Renamed Recipe only logged | low | Registration still succeeds under the kept name; not a failure | reject |
+| 18 | BH/ECH | `SECRET_KEY` matches substrings (`author`, `keystore_path`) | low | Errs toward refusal with the line shown; anchoring would miss `apiKey` | reject |
+| 19 | BH | `PROD_` in `image`/`outputs` not caught | low | AD-14 references are by `secrets:`; `cmd` already covered | reject |
+| 20 | BH | `getMe`/`getChatMember` errors reach the Owner raw | low | The reply still goes out with the error text | reject |
+| 21 | BH/ECH | `failAck` optional or rejecting drops the failure / stalls the offset | false | The messenger always passes it; `handleUpdate` catches and advances the offset (`poller.ts:236`) | reject |
+| 22 | ECH | `--path-format` needs git ≥ 2.31 | low | Host has git 2.47 | reject |
+| 23 | ECH | `toJS()` alias bomb gives a raw yaml error | low | Reply still sent; Owner-written file | reject |
+| 24 | ECH | Inherited `GIT_INDEX_FILE` etc. | low | launchd env has none | reject |
+| 25 | ECH | AC says bare remote; helper uses a non-bare one | low | Clone and fetch behave the same | reject |
+| 26 | BH | Temp dirs not cleaned; fixed unreachable paths; `waitFor` doesn't assert | low | Matches existing `createTempHome` practice | reject |
 
 ## Design Notes
 

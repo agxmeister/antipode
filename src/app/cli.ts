@@ -93,7 +93,7 @@ export async function main(argv: readonly string[], deps: CliDeps = defaultDeps(
   }
   const chatIdOption = parsed.values['chat-id'];
   if (command === 'register') {
-    const chatId = chatIdOption === undefined ? Number.NaN : Number(chatIdOption);
+    const chatId = chatIdOption === undefined || !/^-?\d+$/.test(chatIdOption) ? Number.NaN : Number(chatIdOption);
     if (rest.length !== 1 || !Number.isSafeInteger(chatId)) {
       deps.err('Usage: antipod register <repo> --chat-id <id>');
       return 2;

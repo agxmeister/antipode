@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -20,7 +20,7 @@ afterEach(() => {
 
 const OTHER_CHAT = -100_999;
 
-function harness(chatRefusal?: string) {
+function harness(chatRefusal?: string | (() => Promise<string | undefined>)) {
   const ts = openTestStore();
   open.push(ts);
   const data = join(createTempHome().root, 'data');
@@ -33,7 +33,7 @@ function harness(chatRefusal?: string) {
     store: ts.store,
     coordinator,
     repo: new GitRepo({ dataDir: data, secretsDir: join(data, '..', 'secrets') }),
-    checkChat: async () => chatRefusal,
+    checkChat: typeof chatRefusal === 'function' ? chatRefusal : async () => chatRefusal,
   });
   const repos = (): string[] => (existsSync(join(data, 'repos')) ? readdirSync(join(data, 'repos')) : []);
   return { ts, data, registration, repos };
@@ -162,6 +162,53 @@ describe('Registration', () => {
     const remote = remoteWith(validRecipe());
     remote.commit({ 'antipod.yaml': 'name: Broken\n' }, 'feature');
     expect(await h.registration.register({ repo: remote.dir, chatId: CHAT_ID })).toMatchObject({ ok: true, name: 'Training' });
+  });
+
+  it('runs two registrations started together, both succeeding', async () => {
+    const h = harness();
+    const [a, b] = await Promise.all([
+      h.registration.register({ repo: remoteWith(validRecipe('a')).dir, chatId: CHAT_ID }),
+      h.registration.register({ repo: remoteWith(validRecipe('b')).dir, chatId: OTHER_CHAT }),
+    ]);
+    expect([a.ok, b.ok]).toEqual([true, true]);
+    expect(h.repos().sort()).toEqual(['a.git', 'b.git']);
+  });
+
+  it('resolves a refusal when checkChat throws', async () => {
+    const h = harness(async () => {
+      throw new Error('getMe failed: 502');
+    });
+    expect(await h.registration.register({ repo: remoteWith(validRecipe()).dir, chatId: CHAT_ID })).toEqual({ ok: false, reason: 'getMe failed: 502' });
+  });
+
+  it('keeps the registered name when main renames the Recipe, and refuses a rename onto another Project', async () => {
+    const h = harness();
+    const remote = remoteWith(validRecipe());
+    expect((await h.registration.register({ repo: remote.dir, chatId: CHAT_ID })).ok).toBe(true);
+    expect((await h.registration.register({ repo: remoteWith(validRecipe('jumper')).dir, chatId: OTHER_CHAT })).ok).toBe(true);
+    remote.commit({ 'antipod.yaml': validRecipe('gym'), 'c.txt': 'c' });
+    expect(await h.registration.register({ repo: remote.dir, chatId: CHAT_ID })).toMatchObject({ ok: true, name: 'Training', project: { name: 'training' } });
+    expect(existsSync(join(h.data, 'worktrees', 'training', '_main', 'c.txt'))).toBe(true);
+    remote.commit({ 'antipod.yaml': validRecipe('jumper') });
+    expect(await h.registration.register({ repo: remote.dir, chatId: CHAT_ID })).toEqual({ ok: false, reason: 'a Project named jumper already exists' });
+  });
+
+  it('re-clones when the Project clone was deleted', async () => {
+    const h = harness();
+    const remote = remoteWith(validRecipe());
+    expect((await h.registration.register({ repo: remote.dir, chatId: CHAT_ID })).ok).toBe(true);
+    rmSync(join(h.data, 'repos', 'training.git'), { recursive: true, force: true });
+    rmSync(join(h.data, 'worktrees'), { recursive: true, force: true });
+    expect(await h.registration.register({ repo: remote.dir, chatId: CHAT_ID })).toMatchObject({ ok: true, name: 'Training' });
+    expect(h.repos()).toEqual(['training.git']);
+    expect(existsSync(join(h.data, 'worktrees', 'training', '_main', 'antipod.yaml'))).toBe(true);
+  });
+
+  it('removes a leftover staging clone even when the registration is refused', async () => {
+    const h = harness('this chat is not a supergroup');
+    mkdirSync(join(h.data, 'repos', '.incoming-01CRASHED.git'), { recursive: true });
+    expect((await h.registration.register({ repo: remoteWith(validRecipe()).dir, chatId: CHAT_ID })).ok).toBe(false);
+    expect(h.repos()).toEqual([]);
   });
 
   it('removes a staging clone left by a crashed registration', async () => {

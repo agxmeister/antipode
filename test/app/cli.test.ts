@@ -78,8 +78,11 @@ describe('antipod register (CLI fallback, AD-10)', () => {
     expect(await main(['register', '/tmp/x'], d.deps)).toBe(2);
     expect(await main(['register', '--chat-id', '5'], d.deps)).toBe(2);
     expect(await main(['register', '/tmp/x', '--chat-id', 'abc'], d.deps)).toBe(2);
+    for (const bad of ['', '0x10', '1e3', '1.5']) {
+      expect(await main(['register', '/tmp/x', `--chat-id=${bad}`], d.deps)).toBe(2);
+    }
     expect(await main(['migrate', '--chat-id', '5'], d.deps)).toBe(2);
-    expect(d.err.filter((l) => l.startsWith('Usage: antipod register'))).toHaveLength(3);
+    expect(d.err.filter((l) => l.startsWith('Usage: antipod register'))).toHaveLength(7);
   });
 
   it('refuses without a bot token, since the chat cannot be checked', async () => {

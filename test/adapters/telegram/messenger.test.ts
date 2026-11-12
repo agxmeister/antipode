@@ -174,6 +174,14 @@ describe('TelegramMessenger.checkChat (AD-10)', () => {
   });
 });
 
+describe('TelegramMessenger.checkChat when getChat fails', () => {
+  it("refuses with can't open this chat and the error", async () => {
+    const h = harness();
+    h.tg.fail('getChat', { error_code: 400, description: 'Bad Request: chat not found' });
+    expect(await h.messenger.checkChat(CHAT_ID)).toMatch(/^can't open this chat: .*chat not found/);
+  });
+});
+
 describe('TelegramMessenger.replyRegistration', () => {
   it('replies silently on success and loudly on failure, to the /register message', async () => {
     const h = harness();

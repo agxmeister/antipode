@@ -65,6 +65,8 @@ describe('recipeSchema', () => {
     ['an unknown runner', withStep('test', { runner: 'vm', cmd: 'x', timeout: '1m' }), 'steps.test.runner', 'must be container or host'],
     ['a bad secret name', withStep('test', { runner: 'host', capability: 'c', cmd: 'x', timeout: '1m', secrets: ['api-key'] }), 'steps.test.secrets.0', 'must be a secret name like API_TOKEN'],
     ['a step without cmd', withStep('test', { runner: 'host', capability: 'c', timeout: '1m' }), 'steps.test.cmd', 'is required'],
+    ['a step name with capitals', withStep('Build', { runner: 'host', capability: 'c', cmd: 'x', timeout: '1m' }), 'steps.Build', 'must be a step name like build'],
+    ['a demo naming an inherited property', { ...seed(), demo: { kind: 'file', step: 'toString' } }, 'demo.step', 'must name one of the steps'],
     ['a root that is not a mapping', 'name: x', '', 'must be a mapping'],
   ])('reports %s', (_label, tree, path, message) => {
     expect(issueOf(tree)).toEqual({ path, message });
