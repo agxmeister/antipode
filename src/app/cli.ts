@@ -20,6 +20,7 @@ import { plistFor } from './ops/plist.ts';
 import { upgrade } from './ops/upgrade.ts';
 import { Registration } from './registration.ts';
 import { readInstanceSecrets } from './secrets.ts';
+import { EXIT_REFUSED, requestStep, SOCKET_FILE } from './step-socket.ts';
 
 /** The package root: two levels above this file (`dist/app/cli.js` or `src/app/cli.ts`). */
 export const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
@@ -34,6 +35,8 @@ Commands:
   migrate   Apply pending database migrations
   register <repo> --chat-id <id>
             Register a repo and bind it to a Telegram supergroup (fallback for /register)
+  step <name>
+            Run a Recipe step through the daemon, from inside a Stage (ANTIPOD_STAGE_ID)
 
 The instance is selected by ANTIPOD_HOME (default ~/.antipod).`;
 
@@ -99,6 +102,13 @@ export async function main(argv: readonly string[], deps: CliDeps = defaultDeps(
       return 2;
     }
     return registerCommand(rest[0]!, chatId, deps);
+  }
+  if (command === 'step' && chatIdOption === undefined) {
+    if (rest.length !== 1) {
+      deps.err('Usage: antipod step <name>');
+      return EXIT_REFUSED;
+    }
+    return stepCommand(rest[0]!, deps);
   }
   if (chatIdOption !== undefined) {
     deps.err(`antipod ${command}: unexpected option --chat-id`);
@@ -201,6 +211,22 @@ async function registerCommand(repo: string, chatId: number, deps: CliDeps): Pro
     deps.err(`antipod register: ${message(error)}`);
     return 1;
   }
+}
+
+/**
+ * `antipod step <name>` (AD-6): asks the daemon of `ANTIPOD_HOME` to run the step for the Stage in
+ * `ANTIPOD_STAGE_ID`, prints the log and out paths and exits with the step's code.
+ */
+async function stepCommand(name: string, deps: CliDeps): Promise<number> {
+  const stageId = deps.env['ANTIPOD_STAGE_ID'];
+  if (stageId === undefined || stageId === '') {
+    deps.err('antipod step: ANTIPOD_STAGE_ID is not set; run it from inside a Stage');
+    return EXIT_REFUSED;
+  }
+  const result = await requestStep(join(resolveHome(deps.env), 'run', SOCKET_FILE), { stage_id: stageId, step: name });
+  for (const line of result.out) deps.out(line);
+  for (const line of result.err) deps.err(`antipod step: ${line}`);
+  return result.code;
 }
 
 function apiFromSecrets(secretsDir: string): Api | undefined {

@@ -6,7 +6,7 @@ export const NOW = '2026-11-08T12:00:00.000Z';
 
 /** Inserts a Project, bound to `chatId` unless it is null. */
 export function insertProject(store: SqliteStore, chatId: number | null, name = `p-${ulid()}`): Project {
-  const project: Project = { id: ulid(), name, paused_at: null, telegram_chat_id: chatId, repo_url: null, created_at: NOW };
+  const project: Project = { id: ulid(), name, paused_at: null, telegram_chat_id: chatId, repo_url: null, exclusive_capabilities: [], created_at: NOW };
   store.insertProject(project);
   return project;
 }

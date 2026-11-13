@@ -157,6 +157,22 @@ describe('Registration', () => {
     expect(h.ts.store.projectByChat(CHAT_ID)?.name).toBe('training');
   });
 
+  it('stores the Recipe’s exclusive host capabilities on register and refreshes them on re-register (AD-11)', async () => {
+    const h = harness();
+    const remote = remoteWith(validRecipe());
+    const first = await h.registration.register({ repo: remote.dir, chatId: CHAT_ID });
+    expect(first).toMatchObject({ ok: true, project: { exclusive_capabilities: ['android-emulator'] } });
+    expect(h.ts.store.projectByChat(CHAT_ID)?.exclusive_capabilities).toEqual(['android-emulator']);
+
+    const recipe = validRecipe()
+      .replace('evidence: { runner: host, capability: android-emulator, exclusive: true,', 'evidence: { runner: host, capability: unity-editor, exclusive: true,')
+      .replace('demo:     { runner: container, image: ghcr.io/cirruslabs/android-sdk:34,', 'demo:     { runner: host, capability: openscad,');
+    remote.commit({ 'antipod.yaml': recipe });
+    const again = await h.registration.register({ repo: remote.dir, chatId: CHAT_ID });
+    expect(again).toMatchObject({ ok: true, project: { exclusive_capabilities: ['unity-editor'] } });
+    expect(h.ts.store.projectByChat(CHAT_ID)?.exclusive_capabilities).toEqual(['unity-editor']);
+  });
+
   it('validates the main Recipe even when another branch has an invalid one (AD-22)', async () => {
     const h = harness();
     const remote = remoteWith(validRecipe());

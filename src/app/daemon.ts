@@ -1,8 +1,11 @@
+import { join } from 'node:path';
 import { Api } from 'grammy';
 import { migrate } from '../adapters/sqlite/migrate.ts';
 import { openDatabase, type SqliteDatabase } from '../adapters/sqlite/db.ts';
 import { SqliteStore } from '../adapters/sqlite/store.ts';
 import { GitRepo } from '../adapters/git/repo.ts';
+import { HostRunner, killSteps } from '../adapters/host/runner.ts';
+import { PodmanRunner } from '../adapters/podman/runner.ts';
 import { REGISTER_COMMAND } from '../adapters/telegram/poller.ts';
 import { TelegramMessenger } from '../adapters/telegram/messenger.ts';
 import { Coordinator } from '../core/coordinator/coordinator.ts';
@@ -20,6 +23,8 @@ import { createLogger, type AppLogger, type Logger } from './logger.ts';
 import { acquirePidLock } from './pid-lock.ts';
 import { Registration, REGISTER_USAGE } from './registration.ts';
 import { readInstanceSecrets } from './secrets.ts';
+import { SOCKET_FILE, startStepSocket, type StepSocket } from './step-socket.ts';
+import { recoverSteps, Steps } from './steps.ts';
 
 export type StopSignal = 'SIGTERM' | 'SIGINT';
 
@@ -45,6 +50,8 @@ export interface Daemon {
   readonly messenger: TelegramMessenger | undefined;
   /** The one registration path (AD-10); `/register` jobs run through it. */
   readonly registration: Registration;
+  /** Runs Recipe steps (AD-7); `antipod step` reaches it through the socket. */
+  readonly steps: Steps;
   config(): Config;
   /** Re-reads `config.yaml`; keeps the previous config when it is invalid. Returns whether it applied. */
   reload(): boolean;
@@ -64,6 +71,8 @@ export interface BootOptions {
   telegramApi?: Api;
   /** IANA zone for times in messages; the host's local zone by default. */
   timeZone?: string;
+  /** The podman binary for container steps; `podman` on PATH by default. */
+  podman?: string;
 }
 
 /** No reading: the usage gate stays open (AD-12 fallback arrives with the estimator). */
@@ -103,6 +112,8 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   let scheduler: Scheduler;
   let messenger: TelegramMessenger | undefined;
   let registration: Registration;
+  let steps: Steps;
+  let stepSocket: StepSocket | undefined;
   /** `/register` jobs in flight; `stop()` waits for them before the database closes. */
   const jobs = new Set<Promise<void>>();
   try {
@@ -120,6 +131,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       policy: () => ({ limits: config.limits, roles: config.roles }),
     });
     executor = new EffectExecutor(store, clock, logger);
+    const gitRepo = new GitRepo({ dataDir: paths.data, secretsDir: paths.secrets, log: logger });
     const api = options.telegramApi ?? telegramApiFromSecrets(paths.secrets);
     if (api === undefined) {
       // No bot token: the daemon runs without Telegram and keeps notices on record in the log.
@@ -150,7 +162,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       const telegramRegistration = new Registration({
         store,
         coordinator,
-        repo: new GitRepo({ dataDir: paths.data, secretsDir: paths.secrets, log: logger }),
+        repo: gitRepo,
         checkChat: (chatId) => telegram.checkChat(chatId),
         log: logger,
       });
@@ -177,7 +189,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     registration ??= new Registration({
       store,
       coordinator,
-      repo: new GitRepo({ dataDir: paths.data, secretsDir: paths.secrets, log: logger }),
+      repo: gitRepo,
       checkChat: async () => 'Telegram is not configured',
       log: logger,
     });
@@ -193,11 +205,32 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     });
     // The usage-window launch gate (AD-11); start_stage itself is registered with the claude-cli adapter (story 1-7).
     executor.setGuard(['start_stage'], scheduler.launchGuard);
+    // Step runners (AD-7, AD-19): the capability map and instance secrets are read per step, so SIGHUP applies.
+    const stepsDir = join(paths.data, 'steps');
+    const podman = new PodmanRunner({ instance: paths.root, log: logger, ...(options.podman === undefined ? {} : { podman: options.podman }) });
+    const host = new HostRunner({
+      leases: store,
+      stepsDir,
+      capabilities: () => config.capabilities,
+      instanceSecrets: () => readInstanceSecrets(paths.secrets),
+      clock,
+      log: logger,
+    });
+    steps = new Steps({ store, repo: gitRepo, dataDir: paths.data, secretsDir: paths.secrets, runners: { container: podman, host }, clock, log: logger });
+    // Steps first (AD-18): leased processes and step containers are gone before anything relaunches.
+    const stepRecovery = await recoverSteps({
+      store,
+      clock,
+      killHostSteps: (ids) => killSteps(ids, stepsDir, logger),
+      removeOrphans: () => podman.removeOrphans(),
+      log: logger,
+    });
     const recovery = await recover({ store, coordinator, executor, clock, log: logger });
     // Attached after recovery so nothing drains until recovery has settled the orphaned launches.
     coordinator.onEffectsCommitted(() => executor.notify());
     // After recovery: the replayed effects have queued their rows, and the sender resends every unsent one (AD-18).
     await messenger?.start();
+    stepSocket = await startStepSocket({ path: join(paths.run, SOCKET_FILE), steps, log: logger });
 
     logger.info(
       {
@@ -205,6 +238,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
         home: paths.root,
         schema_version: result.to,
         migrations_applied: result.applied,
+        ...stepRecovery,
         ...recovery,
       },
       'daemon_started',
@@ -212,6 +246,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   } catch (error) {
     logger.fatal({ event: 'daemon_boot_failed', ...errorFields(error) }, 'daemon_boot_failed');
     try {
+      await stepSocket?.close();
       await messenger?.stop();
       db?.close();
     } finally {
@@ -222,6 +257,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   }
 
   const openDb = db;
+  const openSocket = stepSocket;
   const onTick = (): Promise<void> => {
     try {
       const result = deadlines.tick();
@@ -254,6 +290,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     scheduler,
     messenger,
     registration,
+    steps,
     tick: onTick,
     config: () => config,
     reload() {
@@ -272,6 +309,8 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     stop(reason) {
       stopped ??= (async () => {
         clearInterval(tick);
+        // No new step requests; running steps are stopped and their rows finished before the database closes.
+        await openSocket.close();
         // No new Owner input; running registrations finish and queue their replies; then no sends in
         // flight. Unsent rows are resent at next boot (AD-18).
         await messenger?.poller.stop();

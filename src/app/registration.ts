@@ -1,7 +1,7 @@
 import type { Coordinator } from '../core/coordinator/coordinator.ts';
 import { RepoUnreachableError } from '../core/domain/errors.ts';
 import { ulid } from '../core/domain/ids.ts';
-import { RECIPE_FILE } from '../core/domain/recipe.ts';
+import { exclusiveCapabilities, RECIPE_FILE } from '../core/domain/recipe.ts';
 import { projectDisplayName, type Project } from '../core/domain/task.ts';
 import { silentLog, type Log } from '../core/ports/log.ts';
 import { STAGING_PREFIX, type Repo } from '../core/ports/repo.ts';
@@ -125,7 +125,7 @@ export class Registration {
       await this.#repo.promote(staging, name);
       promoted = name;
       await this.#repo.syncMain(name);
-      const project = await this.#coordinator.createProject(name, url);
+      const project = await this.#coordinator.createProject(name, url, recipe.exclusiveCapabilities);
       this.#store.bindProjectChat(project.id, chatId);
       promoted = undefined;
       return { ok: true, project: { ...project, telegram_chat_id: chatId }, name: projectDisplayName(name) };
@@ -156,10 +156,15 @@ export class Registration {
       this.#log.warn({ event: 'recipe_name_changed', project_id: project.id, from: project.name, to: recipe.name }, 'recipe_name_changed');
     }
     await this.#repo.syncMain(project.name);
+    this.#store.setProjectExclusiveCapabilities(project.id, recipe.exclusiveCapabilities);
     if (project.telegram_chat_id !== chatId) {
       this.#store.bindProjectChat(project.id, chatId);
     }
-    return { ok: true, project: { ...project, telegram_chat_id: chatId }, name: projectDisplayName(project.name) };
+    return {
+      ok: true,
+      project: { ...project, telegram_chat_id: chatId, exclusive_capabilities: recipe.exclusiveCapabilities },
+      name: projectDisplayName(project.name),
+    };
   }
 
   /** Replaces the Project's clone with a fresh one; resolves a refusal only when that clone fails too. */
@@ -177,14 +182,14 @@ export class Registration {
     }
   }
 
-  /** The Recipe at `origin/main` of clone `name`, validated (AD-22). */
-  async #readRecipe(name: string): Promise<{ ok: true; name: string } | { ok: false; reason: string }> {
+  /** The Recipe at `origin/main` of clone `name`, validated (AD-22): its name and exclusive capabilities (AD-11). */
+  async #readRecipe(name: string): Promise<{ ok: true; name: string; exclusiveCapabilities: string[] } | { ok: false; reason: string }> {
     const sha = await this.#repo.mainSha(name);
     if (sha === undefined) return { ok: false, reason: NO_MAIN };
     const text = await this.#repo.readFile(name, sha, RECIPE_FILE);
     if (text === undefined) return { ok: false, reason: NO_RECIPE };
     const validation = validateRecipeText(text);
     if (!validation.ok) return validation;
-    return { ok: true, name: validation.recipe.name };
+    return { ok: true, name: validation.recipe.name, exclusiveCapabilities: exclusiveCapabilities(validation.recipe) };
   }
 }

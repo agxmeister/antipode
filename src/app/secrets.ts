@@ -24,14 +24,23 @@ export function parseEnvFile(text: string): Record<string, string> {
   return values;
 }
 
-/** Reads `secrets/antipod.env`; a missing file is no secrets. */
-export function readInstanceSecrets(secretsDir: string): Record<string, string> {
+function readEnvFile(file: string): Record<string, string> {
   let text: string;
   try {
-    text = readFileSync(join(secretsDir, INSTANCE_ENV), 'utf8');
+    text = readFileSync(file, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
     throw error;
   }
   return parseEnvFile(text);
+}
+
+/** Reads `secrets/antipod.env`; a missing file is no secrets. */
+export function readInstanceSecrets(secretsDir: string): Record<string, string> {
+  return readEnvFile(join(secretsDir, INSTANCE_ENV));
+}
+
+/** Reads the Project's secret values, `secrets/<project>.env` (AD-14); a missing file is no secrets. */
+export function readProjectSecrets(secretsDir: string, project: string): Record<string, string> {
+  return readEnvFile(join(secretsDir, `${project}.env`));
 }

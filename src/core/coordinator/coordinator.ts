@@ -90,8 +90,11 @@ export class Coordinator {
     return this.#clock.now().toISOString();
   }
 
-  /** Inserts a Project; `repoUrl` is the remote it was registered from (null outside registration). */
-  createProject(name: string, repoUrl: string | null = null): Promise<Project> {
+  /**
+   * Inserts a Project; `repoUrl` is the remote it was registered from (null outside registration),
+   * `exclusiveCapabilities` the exclusive host capabilities its Recipe names (AD-11).
+   */
+  createProject(name: string, repoUrl: string | null = null, exclusiveCapabilities: readonly string[] = []): Promise<Project> {
     return this.#enqueue(() =>
       this.#store.transaction(() => {
         const project = projectSchema.parse({
@@ -100,6 +103,7 @@ export class Coordinator {
           paused_at: null,
           telegram_chat_id: null,
           repo_url: repoUrl,
+          exclusive_capabilities: [...exclusiveCapabilities],
           created_at: this.#now(),
         });
         this.#store.insertProject(project);

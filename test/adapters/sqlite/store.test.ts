@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { EffectRow } from '../../../src/core/domain/effects.ts';
 import { ulid } from '../../../src/core/domain/ids.ts';
 import type { Stage } from '../../../src/core/domain/stage.ts';
+import type { StepRun } from '../../../src/core/domain/step.ts';
 import type { Project, Task } from '../../../src/core/domain/task.ts';
 import { openTestStore, type TestStore } from '../../helpers/store.ts';
 
@@ -20,7 +21,7 @@ function setup() {
 }
 
 function project(name: string): Project {
-  return { id: ulid(), name, paused_at: null, telegram_chat_id: null, repo_url: null, created_at: NOW };
+  return { id: ulid(), name, paused_at: null, telegram_chat_id: null, repo_url: null, exclusive_capabilities: [], created_at: NOW };
 }
 
 function task(projectId: string, overrides: Partial<Task> = {}): Task {
@@ -55,22 +56,24 @@ function effect(taskId: string | null, kind: 'integrate' | 'run_release' = 'inte
 }
 
 describe('SqliteStore', () => {
-  it('migrations 0002 to 0004 create the STRICT Coordinator and Telegram tables', () => {
+  it('migrations 0002 to 0006 create the STRICT Coordinator, Telegram and step tables', () => {
     const ts = setup();
     const tables = ts.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>;
     expect(tables.map((t) => t.name)).toEqual([
       'callbacks',
+      'capability_leases',
       'effects',
       'outbox',
       'projects',
       'settings',
       'stage_events',
       'stages',
+      'step_runs',
       'task_dependencies',
       'tasks',
       'telegram_messages',
     ]);
-    for (const table of ['tasks', 'task_dependencies', 'outbox', 'callbacks', 'telegram_messages']) {
+    for (const table of ['tasks', 'task_dependencies', 'outbox', 'callbacks', 'telegram_messages', 'step_runs', 'capability_leases']) {
       const sql = ts.db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(table) as { sql: string };
       expect(sql.sql).toContain('STRICT');
     }
@@ -342,5 +345,91 @@ describe('SqliteStore', () => {
     ts.store.insertCallback(row);
     expect(ts.store.getCallback(row.id)).toEqual(row);
     expect(ts.store.getCallback('missing')).toBeUndefined();
+  });
+});
+
+describe('SqliteStore: step runs, leases and exclusive capabilities (AD-7, AD-11)', () => {
+  function stepRun(taskId: string, overrides: Partial<StepRun> = {}): StepRun {
+    return {
+      id: ulid(),
+      task_id: taskId,
+      stage_id: null,
+      step: 'build',
+      runner: 'host',
+      status: 'running',
+      outcome: null,
+      exit_code: null,
+      reason: null,
+      started_at: NOW,
+      ended_at: null,
+      ...overrides,
+    };
+  }
+
+  it('round-trips Project exclusive capabilities and replaces them', () => {
+    const ts = setup();
+    const p = { ...project('alpha'), exclusive_capabilities: ['unity-editor'] };
+    ts.store.insertProject(p);
+    expect(ts.store.getProject(p.id)?.exclusive_capabilities).toEqual(['unity-editor']);
+    ts.store.setProjectExclusiveCapabilities(p.id, ['a', 'b']);
+    expect(ts.store.projectByName('alpha')?.exclusive_capabilities).toEqual(['a', 'b']);
+    expect(() => ts.store.setProjectExclusiveCapabilities('missing', [])).toThrow(/not found/);
+  });
+
+  it('inserts a step run, finishes it and lists by status', () => {
+    const ts = setup();
+    const p = project('alpha');
+    ts.store.insertProject(p);
+    const t = task(p.id);
+    ts.store.insertTask(t);
+    const s = stage(t.id);
+    ts.store.insertStage(s);
+    const run = stepRun(t.id, { stage_id: s.id });
+    ts.store.insertStepRun(run);
+    expect(ts.store.getStepRun(run.id)).toEqual(run);
+    expect(ts.store.stepRunsInStatus(['running']).map((r) => r.id)).toEqual([run.id]);
+    ts.store.finishStepRun(run.id, { status: 'finished', outcome: 'exited', exit_code: 3, reason: null, ended_at: NOW });
+    expect(ts.store.getStepRun(run.id)).toMatchObject({ status: 'finished', outcome: 'exited', exit_code: 3, ended_at: NOW });
+    expect(ts.store.stepRunsInStatus(['running'])).toEqual([]);
+    expect(() => ts.store.finishStepRun('missing', { status: 'failed', outcome: null, exit_code: null, reason: 'x', ended_at: NOW })).toThrow(/not found/);
+  });
+
+  it('a capability has at most one lease; release frees it; clear empties the table', () => {
+    const ts = setup();
+    const p = project('alpha');
+    ts.store.insertProject(p);
+    const a = task(p.id);
+    const b = task(p.id);
+    ts.store.insertTask(a);
+    ts.store.insertTask(b);
+    const runA = stepRun(a.id);
+    const runB = stepRun(b.id);
+    ts.store.insertStepRun(runA);
+    ts.store.insertStepRun(runB);
+    expect(ts.store.acquireLease({ capability: 'emu', task_id: a.id, step_run_id: runA.id, acquired_at: NOW })).toBe(true);
+    expect(ts.store.acquireLease({ capability: 'emu', task_id: b.id, step_run_id: runB.id, acquired_at: NOW })).toBe(false);
+    expect(ts.store.listLeases()).toEqual([{ capability: 'emu', task_id: a.id, step_run_id: runA.id, acquired_at: NOW }]);
+    ts.store.releaseLease(runA.id);
+    expect(ts.store.listLeases()).toEqual([]);
+    expect(ts.store.acquireLease({ capability: 'emu', task_id: b.id, step_run_id: runB.id, acquired_at: NOW })).toBe(true);
+    ts.store.clearLeases();
+    expect(ts.store.listLeases()).toEqual([]);
+  });
+
+  it('capabilityLeasedByOtherProject sees only other Projects’ leases of the named capabilities', () => {
+    const ts = setup();
+    const alpha = project('alpha');
+    const beta = project('beta');
+    ts.store.insertProject(alpha);
+    ts.store.insertProject(beta);
+    const t = task(beta.id);
+    ts.store.insertTask(t);
+    const run = stepRun(t.id);
+    ts.store.insertStepRun(run);
+    ts.store.acquireLease({ capability: 'unity-editor', task_id: t.id, step_run_id: run.id, acquired_at: NOW });
+    expect(ts.store.capabilityLeasedByOtherProject(alpha.id, ['unity-editor'])).toBe(true);
+    expect(ts.store.capabilityLeasedByOtherProject(alpha.id, ['android-emulator'])).toBe(false);
+    expect(ts.store.capabilityLeasedByOtherProject(alpha.id, [])).toBe(false);
+    expect(ts.store.capabilityLeasedByOtherProject(beta.id, ['unity-editor'])).toBe(false);
   });
 });

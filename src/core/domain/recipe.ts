@@ -150,3 +150,23 @@ export function findProdMisuse(recipe: Recipe): { name: string; path: RecipePath
   }
   return undefined;
 }
+
+const DURATION_UNIT_MS = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 } as const;
+
+/** A Recipe duration (`15m`, `90s`, `2h`, `500ms`) in milliseconds; throws on anything else. */
+export function parseDuration(text: string): number {
+  const match = /^([1-9][0-9]*)(ms|s|m|h)$/.exec(text);
+  if (match === null) {
+    throw new Error(`not a duration: ${text}`);
+  }
+  return Number(match[1]) * DURATION_UNIT_MS[match[2] as keyof typeof DURATION_UNIT_MS];
+}
+
+/** The capability names a Recipe's `exclusive: true` host steps lease (AD-7, AD-11), sorted and unique. */
+export function exclusiveCapabilities(recipe: Recipe): string[] {
+  const names = new Set<string>();
+  for (const step of Object.values(recipe.steps)) {
+    if (step.runner === 'host' && step.exclusive && step.capability !== undefined) names.add(step.capability);
+  }
+  return [...names].sort();
+}

@@ -2,7 +2,8 @@
 title: 'Step runners'
 type: 'feature'
 created: '2026-11-13'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '99c651468288cc14cb799c95ca176ab63a4c7024'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -80,13 +81,13 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/adapters/sqlite/migrations/0006-steps.ts`, `index.ts`, `src/core/domain/task.ts`, `src/core/ports/store.ts`, `src/adapters/sqlite/store.ts`, `src/core/coordinator/coordinator.ts` -- step runs, leases, Project capabilities -- AD-2, AD-7
-- [ ] `src/core/coordinator/scheduler.ts`, `src/app/registration.ts` -- hint gate and its data -- AD-11
-- [ ] `src/core/ports/step-runner.ts`, `src/core/domain/recipe.ts` -- port, duration parsing -- one contract
-- [ ] `src/adapters/podman/runner.ts`, `src/adapters/host/runner.ts` -- the two Runners and their recovery helpers -- CAP-2
-- [ ] `src/app/secrets.ts`, `src/app/steps.ts` -- resolution, Preview Data, secrets by name -- CAP-5
-- [ ] `src/app/step-socket.ts`, `src/app/cli.ts`, `src/app/daemon.ts` -- socket, client, wiring, recovery -- AD-6, AD-18
-- [ ] `test/adapters/podman/runner.test.ts` (busybox, skipped with a reason when `podman` is unavailable), `test/adapters/host/runner.test.ts`, `test/app/steps.test.ts`, `test/app/step-socket.test.ts`, `test/adapters/sqlite/store.test.ts`, `test/core/coordinator/scheduler.test.ts`, `test/app/registration.test.ts` -- one test per matrix row -- proof
+- [x] `src/adapters/sqlite/migrations/0006-steps.ts`, `index.ts`, `src/core/domain/task.ts`, `src/core/ports/store.ts`, `src/adapters/sqlite/store.ts`, `src/core/coordinator/coordinator.ts` -- step runs, leases, Project capabilities -- AD-2, AD-7
+- [x] `src/core/coordinator/scheduler.ts`, `src/app/registration.ts` -- hint gate and its data -- AD-11
+- [x] `src/core/ports/step-runner.ts`, `src/core/domain/recipe.ts` -- port, duration parsing -- one contract
+- [x] `src/adapters/podman/runner.ts`, `src/adapters/host/runner.ts` -- the two Runners and their recovery helpers -- CAP-2
+- [x] `src/app/secrets.ts`, `src/app/steps.ts` -- resolution, Preview Data, secrets by name -- CAP-5
+- [x] `src/app/step-socket.ts`, `src/app/cli.ts`, `src/app/daemon.ts` -- socket, client, wiring, recovery -- AD-6, AD-18
+- [x] `test/adapters/podman/runner.test.ts` (busybox, skipped with a reason when `podman` is unavailable), `test/adapters/host/runner.test.ts`, `test/app/steps.test.ts`, `test/app/step-socket.test.ts`, `test/adapters/sqlite/store.test.ts`, `test/core/coordinator/scheduler.test.ts`, `test/app/registration.test.ts` -- one test per matrix row -- proof
 
 **Acceptance Criteria:**
 - Given two Tasks whose host steps name the same exclusive capability, when both run at once, then exactly one spawns and the other returns `capability_busy`; after the first exits the lease row is gone.
@@ -98,9 +99,56 @@ context:
 
 ## Implementation Notes
 
+- `ANTIPOD_PRIOR` is `data/prior/<project>/<task_no>/`, created empty and mounted read-only; 1-10 fills it.
+- Refusals (unknown step, missing secret, unmapped capability, stale Stage, missing worktree) record no `step_runs` row. A run whose Runner cannot start is `failed` with the error; a run stopped by a dropped client or daemon stop is `failed(aborted)` and answered `step <name> was stopped` (exit 2). `capability_busy` is a `finished` row.
+- `StepRunner.refusal()` lets `Steps` ask the host adapter whether a capability is mapped without reading the map itself; the host adapter expands `$NAME`/`${NAME}` from `antipod.env`, leaves `$PATH`, `$HOME`, `$LANG` and `$TMPDIR` for the step's shell when `antipod.env` does not set them, and refuses any other unset reference.
+- After a timeout or abort the host Runner SIGKILLs whatever of the group outlived its leader; on a normal exit the group is left alone.
+- `.antipod-data` gets a `.gitignore` of `*` when created, so Preview Data is never committed from the worktree.
+- Boot recovery kills the process group of every leased step and every host step left `running` (pid file), then clears leases.
+- Boot recovery calls `podman` only when a `step_runs` row was left `running` (a container exists only while its run does); a podman failure there is logged, not fatal.
+- `outputs` is copied to `ANTIPOD_OUT/<outputs>` (relative path kept).
+
 ## Spec Change Log
 
 ## Review Triage Log
+
+Pass 1 (2026-11-14). Layers: blind (B), edge-case (E), verification-gap (V).
+
+| # | Finding | Verdict | Evidence | Route |
+|---|---------|---------|----------|-------|
+| V1 | Post-close group SIGKILL after timeout/abort is untested | medium | Pre-verified: no test has a TERM-ignoring child whose leader dies on TERM; deleting the block passes every test | patch |
+| V2 | Concurrent first steps of one Task (seeding dedup) untested | medium | Pre-verified: the only `Promise.all` uses two Tasks; without the map, the second `rename` fails ENOTEMPTY | patch |
+| V3 | SIGHUP-reloaded capability map reaching the host Runner untested | medium | Pre-verified: no test changes `capabilities` then resolves one | patch |
+| B4+E5+V | `killGroup` rethrows non-ESRCH (EPERM) | medium | `killLeased` runs in `bootDaemon`; a reused pid owned by another user throws EPERM and fails boot; in a timer callback it is an uncaught exception | patch |
+| B1+E7 | Failure after `insertStepRun` (e.g. `#copyOutputs`) leaves the row `running` | medium | `steps.ts` only wraps `runner.run`; a `cp` error escapes `run()`, the row stays `running` until restart and the exit code is lost | patch |
+| B2+E6 | Recovery kills only leased host steps; non-exclusive host steps survive a crash | medium | Host steps are spawned `detached`; `recoverSteps` reads pid files only for `listLeases()`, so an orphan keeps writing into the worktree while its row is `failed(restart)` | patch |
+| B10 | `.antipod-data` inside the worktree is not ignored by git | medium | No exclude handling in `src/`; an Implementer `git add -A` would commit Preview Data | patch |
+| B12+E8 | A step that exited normally as the client dropped is recorded `failed(aborted)` | low | `steps.ts` checks `signal.aborted` regardless of the result; the fix is one condition (only when `exit_code` is null) | patch |
+| E4 | Capability command referencing `$HOME`/`$PATH` is refused as a missing secret | medium | `resolveCapability` treats every `$NAME` as an `antipod.env` key; `$HOME/bin/unity` is refused | patch |
+| B15 | `sprint-status.yaml` `last_updated` format changed | low | Was `DD-MM-YYYY HH:MM`, written as `2026-11-14`; direct correction | patch |
+| V-o1+E19 | Projects registered before migration 6 have `[]` until re-registered | medium | Default `'[]'` with no backfill; the hint gate is inert for them, while the lease still enforces exclusivity | defer |
+| B3+E5 | `killLeased` trusts a pid file that may name a reused pid after a reboot | medium | No start-time or boot-id check; fixing it needs process identity recorded with the pid | defer |
+| B5+E3 | `ANTIPOD_CAPABILITY` carries expanded `antipod.env` values, unquoted | false | Owner decision 2026-11-13 specifies this variable with `$NAME` expanded; shell `$NAME` is also unquoted | reject |
+| B6+E14 | Socket briefly has umask permissions before `chmod` | false | `run/` is created `0700` and chmodded in `home.ts:42-44`, so no other user can reach the socket | reject |
+| B7+E18 | Containers not removed when no row was left `running`; a failed `rm -f` is swallowed | low | Needs both `podman stop` and `rm -f` to fail; a crash always leaves a `running` row | reject |
+| B8 | Container user and file ownership unspecified | maybe-false | Podman machine on macOS maps bind mounts to the host user; no failure shown | reject |
+| B9 | Container steps cannot run git (the bare clone is not mounted) | false | The frozen intent mounts "nothing else"; this is by design | reject |
+| B11+E10 | The `taskId` path skips liveness checks | false | No caller in this story; Coordinator-run steps (1-9, 1-12) decide when to run | reject |
+| B13 | Secret names can override `PATH`/`HOME` or podman's env | low | Requires a Recipe secret named like a system variable; unlikely, and the fix adds validation | reject |
+| B14 | `db.prepare` on every call in two store methods | low | Cheap in better-sqlite3 with few queued Tasks; no harm shown | reject |
+| B16 | No Owner copy for `capability` waiting reason; recovery is log-only | false | No `waiting_reason` copy map exists in `src/` yet (`/status` is a later story); step runs change no Task state here | reject |
+| B17 | Assorted missing tests | low | The material ones are covered by the patches (copyOutputs failure, abort); the rest are unlikely paths | reject |
+| B18 | `data/steps` and `data/prior` are never cleaned up | low | Slow disk growth; a retention policy is beyond this story's fix size | reject |
+| E1 | A timeout above 2^31-1 ms clamps `setTimeout` to 1 ms | low | Needs a timeout of 597h or more; unlikely | reject |
+| E2 | Pid-file write failure after spawn orphans the step | low | The directory was just created by the same process; unlikely | reject |
+| E9 | A step keeps running after its Stage ends | maybe-false | The Stage's `antipod step` client dies with the Stage, dropping the connection, which aborts the step | reject |
+| E11 | `fixtures: .` copies into its own subdirectory | low | Unlikely Recipe value | reject |
+| E12 | A repo that tracks `.antipod-data` is never seeded | low | Unlikely | reject |
+| E13 | An idle client that never sends a newline hangs `stop()` | low | Only the Owner's own processes can connect (0700 `run/`); `antipod step` writes at once | reject |
+| E15 | A long `ANTIPOD_HOME` exceeds `sun_path` | low | The default path is short | reject |
+| E16 | `:` or `,` in a mount path breaks `--volume` | low | Unlikely path | reject |
+| E17 | Podman's own exit codes 125–127 are reported as the step's exit code | low | Visible in the log; the step still fails | reject |
+| E20 | Main changes exclusive capabilities without a re-register | false | The Owner decision refreshes on re-register only; the lease enforces exclusivity | reject |
 
 ## Design Notes
 

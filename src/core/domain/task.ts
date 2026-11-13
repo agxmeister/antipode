@@ -46,7 +46,7 @@ export const ACTIVE_STATES: readonly TaskState[] = [
 export const TERMINAL_STATES: readonly TaskState[] = ['released', 'cancelled'];
 
 /** Why a Task is not starting or launching its next Stage: the failing AD-11 gate, shown by `/status`. */
-export const WAITING_REASONS = ['paused', 'usage_window', 'concurrency', 'open_reviews', 'bootstrap'] as const;
+export const WAITING_REASONS = ['paused', 'usage_window', 'concurrency', 'open_reviews', 'bootstrap', 'capability'] as const;
 export const waitingReasonSchema = z.enum(WAITING_REASONS);
 export type WaitingReason = z.infer<typeof waitingReasonSchema>;
 
@@ -64,6 +64,8 @@ export const projectSchema = z.object({
   telegram_chat_id: z.int().nullable(),
   /** The remote the Project was registered from (AD-5); unique, null only for Projects made outside registration. */
   repo_url: z.string().min(1).nullable(),
+  /** Exclusive host capabilities the validated Recipe names, set at registration (AD-11 hint gate). */
+  exclusive_capabilities: z.array(z.string().min(1)),
   created_at: isoTimestamp,
 });
 export type Project = z.infer<typeof projectSchema>;

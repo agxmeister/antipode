@@ -1,9 +1,16 @@
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { bootDaemon, runDaemon } from '../../src/app/daemon.ts';
+import { ensureHome } from '../../src/app/home.ts';
+import { ulid } from '../../src/core/domain/ids.ts';
+import { taskSchema } from '../../src/core/domain/task.ts';
+import { reopenTestStore } from '../helpers/store.ts';
+import { createTempRemote } from '../helpers/git.ts';
+import { GitRepo } from '../../src/adapters/git/repo.ts';
 import { AntipodError } from '../../src/core/domain/errors.ts';
 import { migrations } from '../../src/adapters/sqlite/migrations/index.ts';
 import { fakeClock } from '../helpers/clock.ts';
@@ -52,6 +59,40 @@ describe('daemon', () => {
       effects_orphaned: 0,
       effects_replayed: 0,
     });
+  });
+
+  it('recovers steps at boot: kills a leased step left running, clears leases, fails its run with restart, serves the socket (AD-18)', async () => {
+    const home = createTempHome();
+    const paths = ensureHome(home.root);
+    const ts = reopenTestStore(paths.database);
+    const now = '2026-11-08T12:00:00.000Z';
+    const project = { id: ulid(), name: 'training', paused_at: null, telegram_chat_id: null, repo_url: null, exclusive_capabilities: ['emu'], created_at: now };
+    ts.store.insertProject(project);
+    const task = taskSchema.parse({
+      id: ulid(), project_id: project.id, kind: 'feature', task_no: 1, state: 'evidencing', current_stage_id: null, budget_used: 1, budget_limit: 5,
+      review_round: 0, resume_state: null, stuck_reason: null, waiting_reason: null, undo_expires_at: null, config_sha: null, created_at: now, updated_at: now,
+    });
+    ts.store.insertTask(task);
+    const runId = ulid();
+    ts.store.insertStepRun({ id: runId, task_id: task.id, stage_id: null, step: 'evidence', runner: 'host', status: 'running', outcome: null, exit_code: null, reason: null, started_at: now, ended_at: null });
+    ts.store.acquireLease({ capability: 'emu', task_id: task.id, step_run_id: runId, acquired_at: now });
+    ts.close();
+    const child = spawn('sh', ['-c', 'sleep 60 & wait'], { detached: true, stdio: 'ignore' });
+    child.unref();
+    mkdirSync(join(paths.data, 'steps', runId), { recursive: true });
+    writeFileSync(join(paths.data, 'steps', runId, 'pid'), `${child.pid}\n`);
+
+    const daemon = await bootDaemon({ env: home.env, podman: '/nonexistent/podman' });
+    try {
+      expect(daemon.store.listLeases()).toEqual([]);
+      expect(daemon.store.getStepRun(runId)).toMatchObject({ status: 'failed', reason: 'restart' });
+      await vi.waitFor(() => expect(() => process.kill(child.pid!, 0)).toThrow());
+      expect(statSync(join(paths.run, 'antipod.sock')).mode & 0o777).toBe(0o600);
+    } finally {
+      await daemon.stop('test');
+    }
+    expect(existsSync(join(paths.run, 'antipod.sock'))).toBe(false);
+    expect(logOf(home).find((line) => line['event'] === 'daemon_started')).toMatchObject({ step_runs_failed: 1, host_steps_killed: 1, leases_cleared: 1 });
   });
 
   it('wires the Coordinator core: a Task moves through the store and effects drain after commit', async () => {
@@ -258,6 +299,33 @@ describe('daemon', () => {
     expect(daemon.store.getTask(second.id)?.state).toBe('implementing');
     await daemon.stop('test');
     expect(events(home)).toContain('config_reloaded');
+  });
+
+  it('a reloaded capability map reaches the host Runner: a host step refused before the reload runs after it', async () => {
+    const home = createTempHome();
+    const remote = createTempRemote();
+    const sha = remote.commit({ 'antipod.yaml': 'name: training\nevidence_kinds: [screenshot]\nsteps:\n  build: { runner: host, capability: echoer, cmd: "true", timeout: 1m }\n' });
+    const daemon = await bootDaemon({ env: home.env, clock: fakeClock() });
+    try {
+      const repo = new GitRepo({ dataDir: daemon.paths.data, secretsDir: daemon.paths.secrets });
+      await repo.ensureClone(remote.dir, '.incoming-test');
+      await repo.promote('.incoming-test', 'training');
+      const project = await daemon.coordinator.createProject('training', remote.dir);
+      const now = new Date().toISOString();
+      const task = taskSchema.parse({
+        id: ulid(), project_id: project.id, kind: 'feature', task_no: 1, state: 'implementing', current_stage_id: null, budget_used: 1, budget_limit: 5,
+        review_round: 0, resume_state: null, stuck_reason: null, waiting_reason: null, undo_expires_at: null, config_sha: sha, created_at: now, updated_at: now,
+      });
+      daemon.store.insertTask(task);
+      mkdirSync(join(daemon.paths.data, 'worktrees', 'training', '1'), { recursive: true });
+
+      expect(await daemon.steps.run({ taskId: task.id, step: 'build' })).toEqual({ ok: false, refused: 'capability echoer is not configured on this host' });
+      home.writeConfig({ owner: { telegram_user_id: 1 }, capabilities: { echoer: '/bin/echo' } });
+      expect(daemon.reload()).toBe(true);
+      expect(await daemon.steps.run({ taskId: task.id, step: 'build' })).toMatchObject({ ok: true, outcome: 'exited', exit_code: 0 });
+    } finally {
+      await daemon.stop('test');
+    }
   });
 
   it('keeps the previous config on an invalid SIGHUP and logs config_reload_failed at error level', async () => {

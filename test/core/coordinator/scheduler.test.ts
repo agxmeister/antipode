@@ -78,7 +78,7 @@ function setup(limits: Partial<SchedulerPolicy['limits']> = {}, usage: Partial<S
   };
 
   const project = (name: string, paused = false): Project => {
-    const p: Project = { id: ulid(), name, paused_at: paused ? clock.now().toISOString() : null, telegram_chat_id: null, repo_url: null, created_at: clock.now().toISOString() };
+    const p: Project = { id: ulid(), name, paused_at: paused ? clock.now().toISOString() : null, telegram_chat_id: null, repo_url: null, exclusive_capabilities: [], created_at: clock.now().toISOString() };
     ts.store.insertProject(p);
     return p;
   };
@@ -135,6 +135,7 @@ describe('evaluateGates (AD-11)', () => {
     openReviewsLimit: 3,
     dependenciesMerged: true,
     bootstrapReleased: true,
+    capabilityBusy: false,
   };
   const allFailing: GateInput = {
     kind: 'feature',
@@ -146,6 +147,7 @@ describe('evaluateGates (AD-11)', () => {
     openReviewsLimit: 3,
     dependenciesMerged: false,
     bootstrapReleased: false,
+    capabilityBusy: true,
   };
 
   it('passes when every gate is open', () => {
@@ -160,6 +162,7 @@ describe('evaluateGates (AD-11)', () => {
     ['open_reviews', { projectPaused: false, usageHeld: false, running: 1 }],
     ['dependencies', { projectPaused: false, usageHeld: false, running: 1, openReviews: 2 }],
     ['bootstrap', { projectPaused: false, usageHeld: false, running: 1, openReviews: 2, dependenciesMerged: true }],
+    ['capability', { projectPaused: false, usageHeld: false, running: 1, openReviews: 2, dependenciesMerged: true, bootstrapReleased: true }],
   ] as const)('reports %s first', (gate, cleared) => {
     expect(evaluateGates({ ...allFailing, ...cleared })).toBe(gate);
   });
@@ -195,6 +198,42 @@ describe('Scheduler (AD-11)', () => {
     expect(s.get(t.id)).toMatchObject({ state: 'implementing', waiting_reason: null, budget_used: 1 });
     expect(s.store.stageEventsOfTask(t.id)).toMatchObject([{ event_type: 'scheduler_start', status: 'applied', to_state: 'implementing' }]);
     expect(s.launched).toEqual([t.id]);
+  });
+
+  it('Capability hint: an exclusive capability leased by another Project holds the Task on capability; after release it starts', async () => {
+    const s = setup();
+    const a = s.bootstrapped('alpha');
+    s.store.setProjectExclusiveCapabilities(a.id, ['unity-editor']);
+    const b = s.bootstrapped('beta');
+    const holder = s.task(b.id, { state: 'evidencing' });
+    const run = ulid();
+    s.store.insertStepRun({
+      id: run, task_id: holder.id, stage_id: null, step: 'evidence', runner: 'host', status: 'running',
+      outcome: null, exit_code: null, reason: null, started_at: s.clock.now().toISOString(), ended_at: null,
+    });
+    s.store.acquireLease({ capability: 'unity-editor', task_id: holder.id, step_run_id: run, acquired_at: s.clock.now().toISOString() });
+    const t = s.task(a.id);
+    await s.tick();
+    expect(s.get(t.id)).toMatchObject({ state: 'queued', waiting_reason: 'capability' });
+    s.store.releaseLease(run);
+    await s.tick();
+    expect(s.get(t.id)).toMatchObject({ state: 'implementing', waiting_reason: null });
+  });
+
+  it('Capability hint: a lease held by the same Project, or of a capability the Recipe does not name, does not hold', async () => {
+    const s = setup();
+    const a = s.bootstrapped('alpha');
+    s.store.setProjectExclusiveCapabilities(a.id, ['unity-editor']);
+    const holder = s.task(a.id, { state: 'evidencing' });
+    const run = ulid();
+    s.store.insertStepRun({
+      id: run, task_id: holder.id, stage_id: null, step: 'evidence', runner: 'host', status: 'running',
+      outcome: null, exit_code: null, reason: null, started_at: s.clock.now().toISOString(), ended_at: null,
+    });
+    s.store.acquireLease({ capability: 'unity-editor', task_id: holder.id, step_run_id: run, acquired_at: s.clock.now().toISOString() });
+    const t = s.task(a.id);
+    await s.tick();
+    expect(s.get(t.id).state).toBe('implementing');
   });
 
   it('Concurrency: cap 2 with one running starts only the oldest of three queued', async () => {

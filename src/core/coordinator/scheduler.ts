@@ -56,11 +56,13 @@ export interface GateInput {
   openReviewsLimit: number;
   dependenciesMerged: boolean;
   bootstrapReleased: boolean;
+  /** An exclusive capability the Project's Recipe names is leased by another Project's Task. */
+  capabilityBusy: boolean;
 }
 
 /**
  * The AD-11 gates in their fixed order; returns the first that fails, or null when the Task may
- * start. The exclusive-capability hint gate arrives with Recipes and leases (story 1-6).
+ * start. The exclusive-capability gate is only a hint; the lease enforces exclusivity (AD-7).
  */
 export function evaluateGates(input: GateInput): Gate | null {
   if (input.projectPaused) return 'paused';
@@ -69,6 +71,7 @@ export function evaluateGates(input: GateInput): Gate | null {
   if (input.openReviews >= input.openReviewsLimit) return 'open_reviews';
   if (!input.dependenciesMerged) return 'dependencies';
   if (input.kind !== 'bootstrap' && !input.bootstrapReleased) return 'bootstrap';
+  if (input.capabilityBusy) return 'capability';
   return null;
 }
 
@@ -271,9 +274,10 @@ export class Scheduler {
       }
       const policy = this.#policy();
       const hold = this.#hold();
+      const project = this.#store.getProject(task.project_id);
       const gate = evaluateGates({
         kind: task.kind,
-        projectPaused: this.#store.getProject(task.project_id)?.paused_at != null,
+        projectPaused: project?.paused_at != null,
         usageHeld: hold !== null,
         running: this.#store.countTasksInStates(RUNNING_STATES),
         concurrency: policy.limits.concurrency,
@@ -281,6 +285,7 @@ export class Scheduler {
         openReviewsLimit: policy.limits.open_reviews,
         dependenciesMerged: this.#store.dependenciesOf(task.id).every(isMergedToMain),
         bootstrapReleased: this.#store.bootstrapReleased(task.project_id),
+        capabilityBusy: project !== undefined && this.#store.capabilityLeasedByOtherProject(project.id, project.exclusive_capabilities),
       });
       if (gate === null) {
         await this.#coordinator.applyEvent(task.id, { type: 'scheduler_start' });

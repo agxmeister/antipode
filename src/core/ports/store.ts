@@ -1,6 +1,7 @@
 import type { EffectRow, EffectStatus } from '../domain/effects.ts';
 import type { StageEventRow } from '../domain/events.ts';
 import type { Stage, StagePatch, StageStatus } from '../domain/stage.ts';
+import type { CapabilityLease, StepRun, StepRunEnd, StepRunStatus } from '../domain/step.ts';
 import type { Project, Task, TaskPatch, TaskState } from '../domain/task.ts';
 import type { CallbackRow, OutboxDraft, OutboxRow, TelegramMessageRow } from '../domain/telegram.ts';
 
@@ -20,6 +21,8 @@ export interface Store {
   projectByName(name: string): Project | undefined;
   /** Projects with at least one Task in `ACTIVE_STATES`. */
   activeProjects(): Project[];
+  /** Replaces the Project's exclusive capability names (registration, from the validated Recipe; AD-11). */
+  setProjectExclusiveCapabilities(projectId: string, names: readonly string[]): void;
 
   insertTask(task: Task): void;
   getTask(id: string): Task | undefined;
@@ -88,6 +91,23 @@ export interface Store {
 
   insertCallback(row: CallbackRow): void;
   getCallback(id: string): CallbackRow | undefined;
+
+  /** Inserts a `step_runs` row before its step is spawned (AD-7). */
+  insertStepRun(row: StepRun): void;
+  getStepRun(id: string): StepRun | undefined;
+  /** Records how a step run ended. */
+  finishStepRun(id: string, end: StepRunEnd): void;
+  stepRunsInStatus(statuses: readonly StepRunStatus[]): StepRun[];
+
+  /** Takes the lease on `lease.capability` in one transaction; false, inserting nothing, when any lease on it exists (AD-7). */
+  acquireLease(lease: CapabilityLease): boolean;
+  /** Releases every lease `stepRunId` holds; none is fine. */
+  releaseLease(stepRunId: string): void;
+  listLeases(): CapabilityLease[];
+  /** Deletes every lease (boot recovery, AD-18). */
+  clearLeases(): void;
+  /** Whether any of `names` is leased by a Task of a Project other than `projectId` (AD-11 hint gate). */
+  capabilityLeasedByOtherProject(projectId: string, names: readonly string[]): boolean;
 
   /** Records a sent message; a repeat of the same `(chat_id, message_id)` replaces it. */
   insertTelegramMessage(row: TelegramMessageRow): void;

@@ -2,6 +2,14 @@ import type { Statement } from 'better-sqlite3';
 import { effectSchema, effectStatusSchema, type EffectRow, type EffectStatus } from '../../core/domain/effects.ts';
 import { stageEventRowSchema, type StageEventRow } from '../../core/domain/events.ts';
 import { stageSchema, type Stage, type StagePatch, type StageStatus } from '../../core/domain/stage.ts';
+import {
+  capabilityLeaseSchema,
+  stepRunSchema,
+  type CapabilityLease,
+  type StepRun,
+  type StepRunEnd,
+  type StepRunStatus,
+} from '../../core/domain/step.ts';
 import { ACTIVE_STATES, projectSchema, taskSchema, type Project, type Task, type TaskPatch, type TaskState } from '../../core/domain/task.ts';
 import { ulid } from '../../core/domain/ids.ts';
 import {
@@ -80,6 +88,14 @@ const OUTBOX_COLUMNS = [
   'sent_at',
 ] as const;
 
+const STEP_RUN_COLUMNS = ['id', 'task_id', 'stage_id', 'step', 'runner', 'status', 'outcome', 'exit_code', 'reason', 'started_at', 'ended_at'] as const;
+
+/** `projects.exclusive_capabilities` is a JSON array in a TEXT column. */
+function toProject(row: unknown): Project {
+  const raw = row as Record<string, unknown>;
+  return projectSchema.parse({ ...raw, exclusive_capabilities: JSON.parse(String(raw['exclusive_capabilities'] ?? '[]')) });
+}
+
 function toOutboxRow(row: unknown): OutboxRow {
   const raw = row as Record<string, unknown>;
   return outboxRowSchema.parse({ ...raw, payload: JSON.parse(String(raw['payload'])) });
@@ -153,12 +169,20 @@ export class SqliteStore implements Store {
     insertTelegramMessage: Statement;
     getTelegramMessage: Statement;
     latestCardOfTask: Statement;
+    setExclusiveCapabilities: Statement;
+    insertStepRun: Statement;
+    getStepRun: Statement;
+    finishStepRun: Statement;
+    acquireLease: Statement;
+    releaseLease: Statement;
+    listLeases: Statement;
+    clearLeases: Statement;
   };
 
   constructor(db: SqliteDatabase) {
     this.#db = db;
     this.#stmt = {
-      insertProject: db.prepare(insertSql('projects', ['id', 'name', 'paused_at', 'telegram_chat_id', 'repo_url', 'created_at'])),
+      insertProject: db.prepare(insertSql('projects', ['id', 'name', 'paused_at', 'telegram_chat_id', 'repo_url', 'exclusive_capabilities', 'created_at'])),
       getProject: db.prepare('SELECT * FROM projects WHERE id = ?'),
       listProjects: db.prepare('SELECT * FROM projects ORDER BY created_at, id'),
       projectByRepo: db.prepare('SELECT * FROM projects WHERE repo_url = ?'),
@@ -237,6 +261,18 @@ export class SqliteStore implements Store {
       latestCardOfTask: db.prepare(
         `SELECT * FROM telegram_messages WHERE task_id = ? AND kind GLOB '*_card' ORDER BY message_id DESC LIMIT 1`,
       ),
+      setExclusiveCapabilities: db.prepare('UPDATE projects SET exclusive_capabilities = ? WHERE id = ?'),
+      insertStepRun: db.prepare(insertSql('step_runs', STEP_RUN_COLUMNS)),
+      getStepRun: db.prepare('SELECT * FROM step_runs WHERE id = ?'),
+      finishStepRun: db.prepare(
+        'UPDATE step_runs SET status = @status, outcome = @outcome, exit_code = @exit_code, reason = @reason, ended_at = @ended_at WHERE id = @id',
+      ),
+      acquireLease: db.prepare(
+        'INSERT INTO capability_leases (capability, task_id, step_run_id, acquired_at) VALUES (@capability, @task_id, @step_run_id, @acquired_at) ON CONFLICT (capability) DO NOTHING',
+      ),
+      releaseLease: db.prepare('DELETE FROM capability_leases WHERE step_run_id = ?'),
+      listLeases: db.prepare('SELECT * FROM capability_leases ORDER BY acquired_at, capability'),
+      clearLeases: db.prepare('DELETE FROM capability_leases'),
     };
   }
 
@@ -248,30 +284,36 @@ export class SqliteStore implements Store {
   }
 
   insertProject(project: Project): void {
-    this.#stmt.insertProject.run(project);
+    this.#stmt.insertProject.run({ ...project, exclusive_capabilities: JSON.stringify(project.exclusive_capabilities) });
   }
 
   getProject(id: string): Project | undefined {
     const row = this.#stmt.getProject.get(id);
-    return row === undefined ? undefined : projectSchema.parse(row);
+    return row === undefined ? undefined : toProject(row);
   }
 
   listProjects(): Project[] {
-    return this.#stmt.listProjects.all().map((row) => projectSchema.parse(row));
+    return this.#stmt.listProjects.all().map((row) => toProject(row));
   }
 
   projectByRepo(repoUrl: string): Project | undefined {
     const row = this.#stmt.projectByRepo.get(repoUrl);
-    return row === undefined ? undefined : projectSchema.parse(row);
+    return row === undefined ? undefined : toProject(row);
   }
 
   projectByName(name: string): Project | undefined {
     const row = this.#stmt.projectByName.get(name);
-    return row === undefined ? undefined : projectSchema.parse(row);
+    return row === undefined ? undefined : toProject(row);
   }
 
   activeProjects(): Project[] {
-    return this.#stmt.activeProjects.all(...ACTIVE_STATES).map((row) => projectSchema.parse(row));
+    return this.#stmt.activeProjects.all(...ACTIVE_STATES).map((row) => toProject(row));
+  }
+
+  setProjectExclusiveCapabilities(projectId: string, names: readonly string[]): void {
+    if (this.#stmt.setExclusiveCapabilities.run(JSON.stringify([...names]), projectId).changes !== 1) {
+      throw new Error(`projects row ${projectId} not found`);
+    }
   }
 
   insertTask(task: Task): void {
@@ -413,7 +455,7 @@ export class SqliteStore implements Store {
 
   projectByChat(chatId: number): Project | undefined {
     const row = this.#stmt.projectByChat.get(chatId);
-    return row === undefined ? undefined : projectSchema.parse(row);
+    return row === undefined ? undefined : toProject(row);
   }
 
   enqueueOutbox(chatId: number, drafts: readonly OutboxDraft[], effectId: string | null, createdAt: string): OutboxRow[] {
@@ -491,6 +533,61 @@ export class SqliteStore implements Store {
   getCallback(id: string): CallbackRow | undefined {
     const row = this.#stmt.getCallback.get(id);
     return row === undefined ? undefined : toCallbackRow(row);
+  }
+
+  insertStepRun(row: StepRun): void {
+    this.#stmt.insertStepRun.run(stepRunSchema.parse(row));
+  }
+
+  getStepRun(id: string): StepRun | undefined {
+    const row = this.#stmt.getStepRun.get(id);
+    return row === undefined ? undefined : stepRunSchema.parse(row);
+  }
+
+  finishStepRun(id: string, end: StepRunEnd): void {
+    if (this.#stmt.finishStepRun.run({ id, ...end }).changes !== 1) {
+      throw new Error(`step_runs row ${id} not found`);
+    }
+  }
+
+  stepRunsInStatus(statuses: readonly StepRunStatus[]): StepRun[] {
+    if (statuses.length === 0) {
+      return [];
+    }
+    return this.#db
+      .prepare(`SELECT * FROM step_runs WHERE status IN (${placeholders(statuses.length)}) ORDER BY id`)
+      .all(...statuses)
+      .map((row) => stepRunSchema.parse(row));
+  }
+
+  acquireLease(lease: CapabilityLease): boolean {
+    const row = capabilityLeaseSchema.parse(lease);
+    return this.transaction(() => this.#stmt.acquireLease.run(row).changes === 1);
+  }
+
+  releaseLease(stepRunId: string): void {
+    this.#stmt.releaseLease.run(stepRunId);
+  }
+
+  listLeases(): CapabilityLease[] {
+    return this.#stmt.listLeases.all().map((row) => capabilityLeaseSchema.parse(row));
+  }
+
+  clearLeases(): void {
+    this.#stmt.clearLeases.run();
+  }
+
+  capabilityLeasedByOtherProject(projectId: string, names: readonly string[]): boolean {
+    if (names.length === 0) {
+      return false;
+    }
+    const row = this.#db
+      .prepare(
+        `SELECT 1 FROM capability_leases l JOIN tasks t ON t.id = l.task_id
+         WHERE t.project_id <> ? AND l.capability IN (${placeholders(names.length)}) LIMIT 1`,
+      )
+      .get(projectId, ...names);
+    return row !== undefined;
   }
 
   insertTelegramMessage(row: TelegramMessageRow): void {

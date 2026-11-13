@@ -36,3 +36,9 @@
 - source_spec: `docs/implementation-artifacts/spec-1-4-telegram-adapter.md`
   summary: A command or text handler that throws must still give the Owner a reply: catch in the handler and queue an `outbox` notice (and `failAck`), or add one central catch in `Poller.#onMessage` that does it for every handler.
   evidence: medium. `Poller.handleUpdate` (`src/adapters/telegram/poller.ts:228`) logs `telegram_update_failed` and advances `telegram.last_update_id`, so the Owner's message is consumed with only `👀` and no reply, against AGENTS.md's rule that a failure the Owner must see becomes an `outbox` notice. Settle in the first story that registers a handler (1-5 `/register`, then 1-8 Intake, 1-15 commands). Raised in the story 1-4 walkthrough detail pass; Owner chose to carry it forward.
+- source_spec: `docs/implementation-artifacts/spec-1-6-step-runners.md`
+  summary: Projects registered before migration 0006 keep `exclusive_capabilities = '[]'` until re-registered, so the AD-11 capability hint gate is inert for them.
+  evidence: Migration 0006 defaults the column to `'[]'` with no backfill from each Project's Recipe; the lease (AD-7) still enforces exclusivity, so only the hint is lost. Fix by backfilling from the main Recipe at boot or on the next sync.
+- source_spec: `docs/implementation-artifacts/spec-1-6-step-runners.md`
+  summary: Boot recovery's `killLeased` SIGKILLs the process group named by a pid file without checking that the pid still belongs to the step (pid reuse after a reboot).
+  evidence: `src/adapters/host/runner.ts` `killLeased` reads only the pid; after a machine restart a reused pid that is a group leader could be an unrelated Owner process. Fix by recording process start time or boot id with the pid and skipping on mismatch.
