@@ -3,10 +3,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CAPABILITY_ENV, HostRunner, killLeased, PID_FILE } from '../../../src/adapters/host/runner.ts';
+import { CAPABILITY_ENV, HostRunner, killLeased, killSteps, parseElapsed, PID_FILE, readProcessTable, stepGroupMismatch, writePidFile } from '../../../src/adapters/host/runner.ts';
 import { ulid } from '../../../src/core/domain/ids.ts';
 import { taskSchema } from '../../../src/core/domain/task.ts';
 import type { StepSpec } from '../../../src/core/ports/step-runner.ts';
+import { silentLog } from '../../../src/core/ports/log.ts';
 import { fakeClock } from '../../helpers/clock.ts';
 import { openTestStore, type TestStore } from '../../helpers/store.ts';
 
@@ -211,11 +212,127 @@ describe('HostRunner (AD-7, AD-19)', () => {
     child.unref();
     const pid = child.pid!;
     mkdirSync(join(h.stepsDir, s.stepRunId), { recursive: true });
-    writeFileSync(join(h.stepsDir, s.stepRunId, PID_FILE), `${pid}\n`);
+    writePidFile(join(h.stepsDir, s.stepRunId, PID_FILE), pid);
     const lease = { capability: 'echoer', task_id: s.taskId, step_run_id: s.stepRunId, acquired_at: NOW };
     const orphan = { capability: 'other', task_id: s.taskId, step_run_id: 'NO-PID-FILE', acquired_at: NOW };
     expect(killLeased([lease, orphan], h.stepsDir)).toBe(1);
     await until(() => !alive(pid));
     expect(killLeased([lease], h.stepsDir)).toBe(0);
+  });
+
+  it('records the leader’s start time with its pid while a step runs', async () => {
+    const h = setup();
+    const s = h.spec('sleep 2');
+    const running = h.runner.run(s);
+    const file = join(h.stepsDir, s.stepRunId, PID_FILE);
+    await until(() => existsSync(file));
+    const [pid, start] = readFileSync(file, 'utf8').trim().split(' ').map(Number);
+    const leader = readProcessTable().find((entry) => entry.pid === pid);
+    expect(leader).toBeDefined();
+    expect(Math.abs(leader!.start - start!)).toBeLessThanOrEqual(2);
+    expect(await running).toEqual({ outcome: 'exited', exit_code: 0 });
+  });
+
+  it('parseElapsed reads every ps etime form', () => {
+    expect(parseElapsed('05')).toBeNaN();
+    expect(parseElapsed('00:07')).toBe(7);
+    expect(parseElapsed(' 12:34')).toBe(754);
+    expect(parseElapsed('01:00:00')).toBe(3600);
+    expect(parseElapsed('2-03:04:05')).toBe(2 * 86400 + 3 * 3600 + 4 * 60 + 5);
+    expect(parseElapsed('ELAPSED')).toBeNaN();
+  });
+
+  it('stepGroupMismatch: leader with the recorded start, or members only that started no earlier, never before boot', () => {
+    expect(stepGroupMismatch(100, 1000, [{ pid: 100, pgid: 100, start: 1001 }])).toBeUndefined();
+    expect(stepGroupMismatch(100, 1000, [{ pid: 100, pgid: 100, start: 5000 }])).toBe('pid reused');
+    // Leader gone, its children left in the group.
+    expect(stepGroupMismatch(100, 1000, [{ pid: 101, pgid: 100, start: 1000 }, { pid: 102, pgid: 100, start: 1200 }])).toBeUndefined();
+    // A group member older than the recorded leader cannot be the step's.
+    expect(stepGroupMismatch(100, 1000, [{ pid: 101, pgid: 100, start: 900 }])).toBe('pid reused');
+    // Recorded before the host booted: whatever holds the pid now is not the step.
+    expect(stepGroupMismatch(100, 1000, [{ pid: 1, pgid: 1, start: 2000 }, { pid: 101, pgid: 100, start: 2500 }])).toBe('host restarted');
+    expect(stepGroupMismatch(100, 1000, [{ pid: 7, pgid: 7, start: 1000 }])).toBe('gone');
+  });
+
+  function capture() {
+    const lines: Array<Record<string, unknown>> = [];
+    const log = { ...silentLog, warn: (fields: Record<string, unknown>) => void lines.push(fields) } as unknown as typeof silentLog;
+    return { lines, log };
+  }
+
+  async function liveGroup(): Promise<number> {
+    const child = spawn('sh', ['-c', 'sleep 60 & wait'], { detached: true, stdio: 'ignore' });
+    child.unref();
+    return child.pid!;
+  }
+
+  it('killSteps spares a live group whose pid was reused', async () => {
+    const h = setup();
+    const pid = await liveGroup();
+    mkdirSync(join(h.stepsDir, 'REUSED'), { recursive: true });
+    // Recorded an hour before the live process with this pid started: another process.
+    writeFileSync(join(h.stepsDir, 'REUSED', PID_FILE), `${pid} ${Math.floor(Date.now() / 1000) - 3600}\n`);
+    const { lines, log } = capture();
+    try {
+      expect(killSteps(['REUSED'], h.stepsDir, log)).toBe(0);
+      expect(lines).toMatchObject([{ event: 'host_step_kill_skipped', step_run_id: 'REUSED', why: 'pid reused' }]);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(alive(pid)).toBe(true);
+    } finally {
+      process.kill(-pid, 'SIGKILL');
+    }
+  });
+
+  it('killSteps spares a pid file without a start time, and every step when ps fails', async () => {
+    const h = setup();
+    const pid = await liveGroup();
+    mkdirSync(join(h.stepsDir, 'LEGACY'), { recursive: true });
+    mkdirSync(join(h.stepsDir, 'A'), { recursive: true });
+    mkdirSync(join(h.stepsDir, 'B'), { recursive: true });
+    writeFileSync(join(h.stepsDir, 'LEGACY', PID_FILE), `${pid}\n`);
+    writePidFile(join(h.stepsDir, 'A', PID_FILE), pid);
+    writePidFile(join(h.stepsDir, 'B', PID_FILE), pid);
+    const { lines, log } = capture();
+    try {
+      expect(killSteps(['LEGACY'], h.stepsDir, log)).toBe(0);
+      expect(lines).toMatchObject([{ step_run_id: 'LEGACY', why: 'no start time' }]);
+      lines.length = 0;
+      const failing = () => {
+        throw new Error('ps: not found');
+      };
+      expect(killSteps(['A', 'B'], h.stepsDir, log, failing)).toBe(0);
+      expect(lines.map((line) => line['step_run_id'])).toEqual(['A', 'B']);
+      expect(alive(pid)).toBe(true);
+    } finally {
+      process.kill(-pid, 'SIGKILL');
+    }
+  });
+
+  it('writePidFile writes only the pid when the start time cannot be read', () => {
+    const h = setup();
+    mkdirSync(h.stepsDir, { recursive: true });
+    const file = join(h.stepsDir, 'pid-only');
+    const { lines, log } = capture();
+    writePidFile(file, 4242, log, () => {
+      throw new Error('ps: not found');
+    });
+    expect(readFileSync(file, 'utf8')).toBe('4242\n');
+    expect(lines).toMatchObject([{ event: 'step_start_time_unknown', pid: 4242 }]);
+  });
+
+  it('killSteps kills the members left in the step’s group after its leader died', async () => {
+    const h = setup();
+    const child = spawn('sh', ['-c', 'sleep 60 & echo $! ; wait'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    child.unref();
+    const pid = child.pid!;
+    const member = Number(await new Promise<string>((resolve) => child.stdout!.once('data', (chunk: Buffer) => resolve(chunk.toString().trim()))));
+    child.stdout!.destroy();
+    mkdirSync(join(h.stepsDir, 'ORPHANED'), { recursive: true });
+    writePidFile(join(h.stepsDir, 'ORPHANED', PID_FILE), pid);
+    process.kill(pid, 'SIGKILL');
+    await until(() => !readProcessTable().some((entry) => entry.pid === pid));
+    expect(alive(member)).toBe(true);
+    expect(killSteps(['ORPHANED'], h.stepsDir)).toBe(1);
+    await until(() => !alive(member));
   });
 });

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { killSteps, PID_FILE } from '../../src/adapters/host/runner.ts';
+import { killSteps, PID_FILE, writePidFile } from '../../src/adapters/host/runner.ts';
 import { PREVIEW_DATA_DIR, recoverSteps, STAGE_NOT_RUNNING } from '../../src/app/steps.ts';
 import { ulid } from '../../src/core/domain/ids.ts';
 import { fakeClock } from '../helpers/clock.ts';
@@ -272,14 +272,14 @@ describe('recoverSteps (AD-18)', () => {
     const child = spawn('sh', ['-c', 'sleep 60 & wait'], { detached: true, stdio: 'ignore' });
     child.unref();
     mkdirSync(join(stepsDir, id), { recursive: true });
-    writeFileSync(join(stepsDir, id, PID_FILE), `${child.pid}\n`);
+    writePidFile(join(stepsDir, id, PID_FILE), child.pid!);
     // A non-exclusive host step left running: no lease, only its row and pid file.
     const plain = ulid();
     h.store.insertStepRun({ id: plain, task_id: h.task.id, stage_id: h.stage.id, step: 'build', runner: 'host', status: 'running', outcome: null, exit_code: null, reason: null, started_at: '2026-11-08T12:00:00.000Z', ended_at: null });
     const plainChild = spawn('sh', ['-c', 'sleep 60 & wait'], { detached: true, stdio: 'ignore' });
     plainChild.unref();
     mkdirSync(join(stepsDir, plain), { recursive: true });
-    writeFileSync(join(stepsDir, plain, PID_FILE), `${plainChild.pid}\n`);
+    writePidFile(join(stepsDir, plain, PID_FILE), plainChild.pid!);
     let removals = 0;
     const report = await recoverSteps({
       store: h.store,

@@ -13,6 +13,7 @@ import { createTempRemote } from '../helpers/git.ts';
 import { GitRepo } from '../../src/adapters/git/repo.ts';
 import { AntipodError } from '../../src/core/domain/errors.ts';
 import { migrations } from '../../src/adapters/sqlite/migrations/index.ts';
+import { PID_FILE, writePidFile } from '../../src/adapters/host/runner.ts';
 import { fakeClock } from '../helpers/clock.ts';
 import { createTempHome, readLogLines, type TempHome } from '../helpers/home.ts';
 import { CHAT_ID, fakeTelegram, textUpdate } from '../helpers/telegram.ts';
@@ -80,7 +81,7 @@ describe('daemon', () => {
     const child = spawn('sh', ['-c', 'sleep 60 & wait'], { detached: true, stdio: 'ignore' });
     child.unref();
     mkdirSync(join(paths.data, 'steps', runId), { recursive: true });
-    writeFileSync(join(paths.data, 'steps', runId, 'pid'), `${child.pid}\n`);
+    writePidFile(join(paths.data, 'steps', runId, PID_FILE), child.pid!);
 
     const daemon = await bootDaemon({ env: home.env, podman: '/nonexistent/podman' });
     try {

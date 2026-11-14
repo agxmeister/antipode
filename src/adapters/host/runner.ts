@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CapabilityLease } from '../../core/domain/step.ts';
@@ -9,8 +9,13 @@ import type { Store } from '../../core/ports/store.ts';
 
 /** SIGTERM to the step's process group, then SIGKILL after this long (AD-7 timeout). */
 export const KILL_GRACE_MS = 10_000;
-/** The file in `data/steps/<step_run_id>/` naming the step's process group, for boot recovery (AD-18). */
+/**
+ * The file in `data/steps/<step_run_id>/` naming the step's process group for boot recovery (AD-18):
+ * `<pid> <start>`, the leader's pid and its start time in epoch seconds, so a reused pid is never killed.
+ */
 export const PID_FILE = 'pid';
+/** `ps -o etime` has one-second resolution; start times this close are the same process. */
+const START_TOLERANCE_S = 2;
 /** The variable through which a host step reaches its capability command. */
 export const CAPABILITY_ENV = 'ANTIPOD_CAPABILITY';
 /** The only daemon variables a host step inherits besides the contract. */
@@ -149,7 +154,7 @@ export class HostRunner implements StepRunner {
     }
     const pid = child.pid;
     if (pid !== undefined) {
-      writeFileSync(pidFile, `${pid}\n`, { mode: 0o600 });
+      writePidFile(pidFile, pid, this.#log);
     }
 
     return new Promise<StepResult>((resolve, reject) => {
@@ -190,8 +195,8 @@ export class HostRunner implements StepRunner {
 }
 
 /**
- * Boot recovery (AD-18): SIGKILLs the process group of every leased step, read from its pid file
- * under `stepsDir`. Returns how many groups were still alive. Missing pid files are skipped.
+ * Boot recovery (AD-18): `killSteps` for the step run of every lease. Returns how many groups were
+ * killed; groups that are no longer the step's (see `killSteps`) are spared.
  */
 export function killLeased(leases: readonly CapabilityLease[], stepsDir: string, log: Log = silentLog): number {
   return killSteps(
@@ -201,20 +206,134 @@ export function killLeased(leases: readonly CapabilityLease[], stepsDir: string,
   );
 }
 
+/** One row of the process table: pid, process group and start time in epoch seconds. */
+export interface ProcessEntry {
+  pid: number;
+  pgid: number;
+  start: number;
+}
+
+/** How long one `ps` call may take before it is killed. */
+const PS_TIMEOUT_MS = 10_000;
+
+/** `[[dd-]hh:]mm:ss` (`ps -o etime`) in seconds; NaN when malformed. */
+export function parseElapsed(text: string): number {
+  const match = /^(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)$/.exec(text.trim());
+  if (match === null) return Number.NaN;
+  const [, days, hours, minutes, seconds] = match;
+  return ((Number(days ?? 0) * 24 + Number(hours ?? 0)) * 60 + Number(minutes)) * 60 + Number(seconds);
+}
+
 /**
- * SIGKILLs the process group named by the pid file of each step run (deduplicated) under `stepsDir`;
- * returns how many groups were still alive. Missing pid files are skipped; never throws.
+ * The host's processes (`ps -A`), or only `pid` when given, with start times derived from their
+ * elapsed time. Pid 1 starts at boot, so its entry also dates the boot.
  */
-export function killSteps(stepRunIds: readonly string[], stepsDir: string, log: Log = silentLog): number {
-  let killed = 0;
+export function readProcessTable(pid?: number, nowMs: number = Date.now()): ProcessEntry[] {
+  const select = pid === undefined ? ['-A'] : ['-p', String(pid)];
+  let text: string;
+  try {
+    text = execFileSync('ps', [...select, '-o', 'pid=,pgid=,etime='], {
+      encoding: 'utf8',
+      env: { PATH: process.env['PATH'] ?? '/bin:/usr/bin', LC_ALL: 'C' },
+      timeout: PS_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
+  } catch (error) {
+    // `ps -p` exits 1 when the pid is gone: an empty table, not a failure.
+    if (pid !== undefined && (error as { status?: number }).status === 1) return [];
+    throw error;
+  }
+  const now = Math.floor(nowMs / 1000);
+  const entries: ProcessEntry[] = [];
+  for (const line of text.split('\n')) {
+    const [pidText, pgidText, etime] = line.trim().split(/\s+/);
+    if (pidText === undefined || pgidText === undefined || etime === undefined) continue;
+    const elapsed = parseElapsed(etime);
+    if (Number.isNaN(elapsed)) continue;
+    entries.push({ pid: Number(pidText), pgid: Number(pgidText), start: now - elapsed });
+  }
+  return entries;
+}
+
+/**
+ * Writes `<pid> <start>` for a just-spawned step leader. Without a readable start time only the pid
+ * is written, and recovery will not kill that group (no identity, no kill).
+ */
+export function writePidFile(file: string, pid: number, log: Log = silentLog, table: (pid: number) => ProcessEntry[] = readProcessTable): void {
+  let start: number | undefined;
+  try {
+    start = table(pid).find((entry) => entry.pid === pid)?.start;
+  } catch (error) {
+    log.warn({ event: 'step_start_time_unknown', pid, error: String(error) }, 'step_start_time_unknown');
+  }
+  writeFileSync(file, start === undefined ? `${pid}\n` : `${pid} ${start}\n`, { mode: 0o600 });
+}
+
+/**
+ * Why process group `pid` is no longer the step recorded with leader start `start`, or undefined
+ * when it is: its leader is alive with that start time, or the leader is gone and every surviving
+ * member started no earlier (a pid is not reused while a process group with that id exists). A step
+ * recorded before the host booted (pid 1's start) is never alive. `gone` means nothing is left to kill.
+ */
+export function stepGroupMismatch(pid: number, start: number, table: readonly ProcessEntry[]): 'gone' | 'host restarted' | 'pid reused' | undefined {
+  const leader = table.find((entry) => entry.pid === pid);
+  const members = table.filter((entry) => entry.pgid === pid);
+  if (leader === undefined && members.length === 0) return 'gone';
+  const init = table.find((entry) => entry.pid === 1);
+  if (init !== undefined && start < init.start - START_TOLERANCE_S) return 'host restarted';
+  if (leader !== undefined) return Math.abs(leader.start - start) <= START_TOLERANCE_S ? undefined : 'pid reused';
+  return members.every((entry) => entry.start >= start - START_TOLERANCE_S) ? undefined : 'pid reused';
+}
+
+/**
+ * SIGKILLs the process group named by the pid file of each step run (deduplicated) under `stepsDir`,
+ * only when that group is still the step's (`stepGroupMismatch`); returns how many groups were killed.
+ * Missing pid files and groups already gone are skipped; a pid file without a start time, a group that
+ * is no longer the step's, or a failed `ps` is skipped and logged. Never throws.
+ */
+export function killSteps(
+  stepRunIds: readonly string[],
+  stepsDir: string,
+  log: Log = silentLog,
+  table: () => ProcessEntry[] = () => readProcessTable(),
+): number {
+  const recorded: Array<{ stepRunId: string; pid: number; start: number }> = [];
   for (const stepRunId of new Set(stepRunIds)) {
-    let pid: number;
+    let text: string;
     try {
-      pid = Number.parseInt(readFileSync(join(stepsDir, stepRunId, PID_FILE), 'utf8').trim(), 10);
+      text = readFileSync(join(stepsDir, stepRunId, PID_FILE), 'utf8');
     } catch {
       continue;
     }
+    const [pidText, startText] = text.trim().split(/\s+/);
+    const pid = Number.parseInt(pidText ?? '', 10);
     if (!Number.isSafeInteger(pid) || pid <= 1) continue;
+    const start = startText === undefined ? Number.NaN : Number(startText);
+    if (!Number.isFinite(start)) {
+      log.warn({ event: 'host_step_kill_skipped', step_run_id: stepRunId, pid, why: 'no start time' }, 'host_step_kill_skipped');
+      continue;
+    }
+    recorded.push({ stepRunId, pid, start });
+  }
+  if (recorded.length === 0) return 0;
+  let processes: ProcessEntry[];
+  try {
+    processes = table();
+  } catch (error) {
+    for (const { stepRunId, pid } of recorded) {
+      log.warn({ event: 'host_step_kill_skipped', step_run_id: stepRunId, pid, why: `ps failed: ${String(error)}` }, 'host_step_kill_skipped');
+    }
+    return 0;
+  }
+  let killed = 0;
+  for (const { stepRunId, pid, start } of recorded) {
+    const mismatch = stepGroupMismatch(pid, start, processes);
+    if (mismatch === 'gone') continue;
+    if (mismatch !== undefined) {
+      const observed = processes.filter((entry) => entry.pid === pid || entry.pgid === pid).map((entry) => entry.start);
+      log.warn({ event: 'host_step_kill_skipped', step_run_id: stepRunId, pid, why: mismatch, recorded_start: start, observed_starts: observed }, 'host_step_kill_skipped');
+      continue;
+    }
     if (killGroup(pid, 'SIGKILL', log)) {
       killed++;
       log.info({ event: 'host_step_killed', step_run_id: stepRunId, pid }, 'host_step_killed');
