@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { stageUsageSchema } from './stage.ts';
 import { taskStateSchema } from './task.ts';
 
 const stageId = z.string().min(1);
@@ -10,6 +11,17 @@ function plain<T extends string>(type: T) {
 /** A Stage or step event: carries the `stage_id` it reports on and is stale-checked (AD-3). */
 function fromStage<T extends string>(type: T) {
   return z.strictObject({ type: z.literal(type), stage_id: stageId });
+}
+
+/**
+ * Usage of the agent Stage an event reports on (AD-4): null when unknown (no `result` message, as
+ * after SIGTERM); absent on events that no agent run produced.
+ */
+const usage = stageUsageSchema.nullable().optional();
+
+/** The typed result of an agent Stage: its `stage_id` and the usage read from its stream. */
+function fromAgent<T extends string>(type: T) {
+  return z.strictObject({ type: z.literal(type), stage_id: stageId, usage });
 }
 
 /**
@@ -33,22 +45,22 @@ export const eventSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('deps_unsatisfiable'), reason: z.string().min(1) }),
   // Stage lifecycle
   fromStage('stage_started'),
-  z.strictObject({ type: z.literal('stage_failed'), stage_id: stageId, reason: z.string().min(1) }),
+  z.strictObject({ type: z.literal('stage_failed'), stage_id: stageId, reason: z.string().min(1), usage }),
   z.strictObject({ type: z.literal('stage_retries_exhausted'), reason: z.string().min(1).optional() }),
   // Stage and step results
-  fromStage('implementer_done'),
+  fromAgent('implementer_done'),
   fromStage('test_failed'),
   fromStage('test_passed'),
-  fromStage('blocking_findings'),
-  fromStage('nonblocking_findings'),
-  fromStage('pass'),
-  fromStage('rerun'),
-  fromStage('parked'),
-  z.strictObject({ type: z.literal('reason_written'), stage_id: stageId, reason: z.string().min(1) }),
-  fromStage('evidence_produced'),
-  fromStage('evidence_missing'),
-  fromStage('evidence_rejected'),
-  fromStage('evidence_verified'),
+  fromAgent('blocking_findings'),
+  fromAgent('nonblocking_findings'),
+  fromAgent('pass'),
+  fromAgent('rerun'),
+  fromAgent('parked'),
+  z.strictObject({ type: z.literal('reason_written'), stage_id: stageId, reason: z.string().min(1), usage }),
+  fromAgent('evidence_produced'),
+  fromAgent('evidence_missing'),
+  fromAgent('evidence_rejected'),
+  fromAgent('evidence_verified'),
   // Review, Integration and Release
   plain('correction'),
   plain('accepted'),

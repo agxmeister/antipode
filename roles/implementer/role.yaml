@@ -1,0 +1,5 @@
+# Role Config (spine AD-15). timeout, retries and max_turns are left to config.yaml roles.implementer
+# (config-defaults.md); set them here, in $ANTIPOD_HOME/roles/implementer/role.yaml or in the repo's
+# .antipod/roles/implementer/role.yaml to override.
+output_schema: implementer
+permission_mode: dontAsk

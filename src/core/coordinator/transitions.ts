@@ -8,7 +8,10 @@ export interface TransitionContext {
   now: Date;
   /** Mints the id of a Stage the transition starts. */
   newId(): string;
-  /** `retries` of the Role Config (AD-4); roles without a config entry get `DEFAULT_STAGE_RETRIES`. */
+  /**
+   * `retries` of `config.yaml` `roles.<role>` (AD-4); roles without a config entry get `DEFAULT_STAGE_RETRIES`.
+   * A Stage whose launch stored its resolved Role Config `retries` uses that instead.
+   */
   retriesFor(role: string): number;
   limits: { undo_accept_ms: number; undo_discard_ms: number };
   /** The next per-Project Task number, read when `approved` assigns it (AD-16). */
@@ -283,7 +286,9 @@ function generic(task: Task, stage: Stage | undefined, event: Event, ctx: Transi
     case 'stage_failed': {
       if (!isStageState(task.state) || stage === undefined) return { ignored: 'invalid' };
       const failed: StageUpdate = { status: 'failed', reason: event.reason };
-      if (stage.attempt <= ctx.retriesFor(stage.role)) {
+      // The Role Config resolved at launch wins (AD-15); a Stage that never got that far uses the config default.
+      const retries = stage.retries ?? ctx.retriesFor(stage.role);
+      if (stage.attempt <= retries) {
         return enter(task.state, task, stage, ctx, { cause: event.type, attempt: stage.attempt + 1, stageUpdate: failed });
       }
       const reason = `${stage.role} Stage failed ${stage.attempt} times; last failure: ${event.reason}`;

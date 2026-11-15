@@ -1,0 +1,5 @@
+# Role Config (spine AD-15). timeout, retries and max_turns are left to config.yaml roles.triage
+# (config-defaults.md); set them here, in $ANTIPOD_HOME/roles/triage/role.yaml or in the repo's
+# .antipod/roles/triage/role.yaml to override.
+output_schema: triage
+permission_mode: dontAsk

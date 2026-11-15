@@ -1,0 +1,79 @@
+#!/usr/bin/env node
+// A fake `claude` for tests (spine AD-24): never touches the Owner's login or the network.
+//
+// It reads its scenario from `$ANTIPOD_HOME/fake-claude/scenario.json` (`$FAKE_CLAUDE_DIR` instead,
+// when set): `{ "runs": [run, ...] }`, the Nth launch playing `runs[N]` (the last one repeats).
+// A run is:
+//   text               assistant text streamed before the result (default "working")
+//   structured_output  the typed output carried by the result
+//   subtype            result subtype (default "success")
+//   result             false: print no result message
+//   exit               exit code (default 0)
+//   sleepMs            wait this long before the result
+//   ignoreSigint       keep running on SIGINT (exits 143 on SIGTERM, printing nothing more)
+//   usage              the result's usage object
+//   splitResult        write the result line in two chunks, split inside its first multi-byte character
+// Every launch appends `{argv, env, cwd, stdin, pid}` to `calls.jsonl` in the same directory.
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const dir = process.env.FAKE_CLAUDE_DIR || join(process.env.ANTIPOD_HOME || '/nonexistent', 'fake-claude');
+mkdirSync(dir, { recursive: true });
+const callsFile = join(dir, 'calls.jsonl');
+const scenarioFile = join(dir, 'scenario.json');
+const scenario = existsSync(scenarioFile) ? JSON.parse(readFileSync(scenarioFile, 'utf8')) : { runs: [{}] };
+const index = existsSync(callsFile) ? readFileSync(callsFile, 'utf8').split('\n').filter((l) => l !== '').length : 0;
+const runs = scenario.runs && scenario.runs.length > 0 ? scenario.runs : [{}];
+const run = runs[Math.min(index, runs.length - 1)];
+
+const out = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
+/** Exits only once everything written has left: an asynchronous pipe would otherwise lose the tail. */
+const exitAfterFlush = (code) => process.stdout.write('', () => process.exit(code));
+
+let stdin = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  stdin += chunk;
+});
+process.stdin.on('end', () => {
+  appendFileSync(callsFile, `${JSON.stringify({ argv: process.argv.slice(2), env: process.env, cwd: process.cwd(), stdin, pid: process.pid })}\n`);
+  play();
+});
+
+process.on('SIGINT', () => {
+  if (run.ignoreSigint) return;
+  process.exit(130);
+});
+process.on('SIGTERM', () => process.exit(143));
+
+function play() {
+  out({ type: 'system', subtype: 'init', session_id: 'fake' });
+  out({ type: 'assistant', message: { content: [{ type: 'text', text: run.text ?? 'working' }] } });
+  setTimeout(() => {
+    if (run.result !== false) {
+      const result = {
+        type: 'result',
+        subtype: run.subtype ?? 'success',
+        is_error: (run.subtype ?? 'success') !== 'success',
+        duration_ms: 1234,
+        num_turns: 3,
+        total_cost_usd: 0.42,
+        usage: run.usage ?? { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 10, cache_creation_input_tokens: 5 },
+        ...('structured_output' in run ? { structured_output: run.structured_output } : {}),
+      };
+      if (run.splitResult) {
+        const bytes = Buffer.from(`${JSON.stringify(result)}\n`, 'utf8');
+        const at = bytes.findIndex((byte) => byte >= 0x80) + 1;
+        process.stdout.write(bytes.subarray(0, at), () => {
+          setTimeout(() => {
+            process.stdout.write(bytes.subarray(at));
+            exitAfterFlush(run.exit ?? 0);
+          }, 50);
+        });
+        return;
+      }
+      out(result);
+    }
+    exitAfterFlush(run.exit ?? 0);
+  }, run.sleepMs ?? 0);
+}

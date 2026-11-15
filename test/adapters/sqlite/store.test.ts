@@ -47,7 +47,7 @@ function task(projectId: string, overrides: Partial<Task> = {}): Task {
 }
 
 function stage(taskId: string, overrides: Partial<Stage> = {}): Stage {
-  return { id: ulid(), task_id: taskId, role: 'implementer', attempt: 1, status: 'starting', reason: null, created_at: NOW, started_at: null, ended_at: null, ...overrides };
+  return { id: ulid(), task_id: taskId, role: 'implementer', attempt: 1, status: 'starting', reason: null, created_at: NOW, started_at: null, ended_at: null, retries: null, ...overrides };
 }
 
 function effect(taskId: string | null, kind: 'integrate' | 'run_release' = 'integrate'): EffectRow {
@@ -148,6 +148,13 @@ describe('SqliteStore', () => {
     expect(ts.store.stagesInStatus(['starting'])).toEqual([]);
     expect(ts.store.stagesOfTask(t.id).map((s) => s.status)).toEqual(['failed', 'running']);
     expect(() => ts.store.updateStage(s1.id, { role: 'x' } as never)).toThrow(/not patchable/);
+    // The resolved Role Config retries, stored at launch (AD-4, AD-15; migration 0007).
+    ts.store.updateStage(s2.id, { retries: 4 });
+    expect(ts.store.getStage(s2.id)?.retries).toBe(4);
+    const s3 = stage(t.id, { attempt: 3 });
+    delete (s3 as Partial<Stage>).retries;
+    ts.store.insertStage(s3);
+    expect(ts.store.getStage(s3.id)?.retries).toBeNull();
   });
 
   it('stage_events append in order and read back with their payload', () => {

@@ -104,13 +104,24 @@ describe('daemon', () => {
     expect(task.budget_limit).toBe(daemon.config().limits.iteration_budget);
     await daemon.coordinator.applyEvent(task.id, { type: 'scheduler_start' });
     expect(daemon.store.getTask(task.id)).toMatchObject({ state: 'implementing', budget_used: 1 });
-    // The commit hook drains without anyone calling drain(). No start_stage handler yet (story 1-4):
-    // the effect fails no_handler and is logged, never left pending.
-    await vi.waitFor(() => expect(daemon.store.effectsOfTask(task.id)[0]?.status).not.toBe('pending'));
-    expect(daemon.store.effectsOfTask(task.id)).toMatchObject([{ kind: 'start_stage', status: 'failed', error: 'no_handler' }]);
+    // The commit hook drains without anyone calling drain(). The Task has no worktree, so every launch
+    // fails `launch` and is retried, never left pending, until the Task is stuck (AD-4).
+    await vi.waitFor(() => expect(daemon.store.getTask(task.id)?.state).toBe('stuck'));
+    expect(daemon.store.effectsOfTask(task.id).map((row) => [row.kind, row.status])).toEqual([
+      ['start_stage', 'done'],
+      ['start_stage', 'done'],
+      ['start_stage', 'done'],
+    ]);
+    expect(daemon.store.stagesOfTask(task.id).map((stage) => [stage.status, stage.reason])).toEqual([
+      ['failed', 'launch'],
+      ['failed', 'launch'],
+      ['failed', 'launch'],
+    ]);
+    expect(daemon.executor.has('start_stage')).toBe(true);
+    expect(daemon.executor.has('cancel_stage')).toBe(true);
     expect(daemon.executor.has('back_online')).toBe(true);
     await daemon.stop('test');
-    expect(logOf(home).find((line) => line['event'] === 'effect_failed')).toMatchObject({ level: 50, error: 'no_handler' });
+    expect(logOf(home).find((line) => line['event'] === 'stage_launch_failed')).toMatchObject({ level: 50, reason: 'launch', task_id: task.id });
   });
 
   it('one tick starts a queued bootstrap Task: implementing with a start_stage effect (AD-11)', async () => {

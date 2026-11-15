@@ -304,6 +304,23 @@ describe('Stage retries (AD-4)', () => {
     const outcome = applied(transition(task('testing'), stage('testing', { attempt: 2 }), { type: 'stage_failed', stage_id: CURRENT, reason: 'capability_busy' }, retries));
     expect(outcome.startStage?.attempt).toBe(3);
   });
+
+  it('the resolved Role Config retries stored on the Stage win over the config default (AD-15)', () => {
+    const failed = { type: 'stage_failed', stage_id: CURRENT, reason: 'exit' } as const;
+    const none = applied(transition(task('implementing'), stage('implementing', { retries: 0 }), failed, ctx()));
+    expect(none.startStage).toBeUndefined();
+    expect(none.derived).toEqual([{ type: 'stage_retries_exhausted', reason: 'implementer Stage failed 1 times; last failure: exit' }]);
+    const more = applied(transition(task('implementing'), stage('implementing', { attempt: 4, retries: 5 }), failed, ctx()));
+    expect(more.startStage?.attempt).toBe(5);
+    const unset = applied(transition(task('implementing'), stage('implementing', { retries: null }), failed, ctx({ retriesFor: () => 0 })));
+    expect(unset.startStage).toBeUndefined();
+  });
+
+  it('stage_failed and Stage result events carry usage in their payload', () => {
+    const usage = { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: null, cache_creation_input_tokens: null, cost_usd: 0.1, duration_ms: 5 };
+    expect(applied(transition(task('implementing'), stage('implementing'), { type: 'implementer_done', stage_id: CURRENT, usage }, ctx())).next).toBe('testing');
+    expect(applied(transition(task('implementing'), stage('implementing'), { type: 'stage_failed', stage_id: CURRENT, reason: 'timeout', usage: null }, ctx())).startStage?.attempt).toBe(2);
+  });
 });
 
 describe('pause and resume', () => {

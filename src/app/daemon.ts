@@ -3,6 +3,8 @@ import { Api } from 'grammy';
 import { migrate } from '../adapters/sqlite/migrate.ts';
 import { openDatabase, type SqliteDatabase } from '../adapters/sqlite/db.ts';
 import { SqliteStore } from '../adapters/sqlite/store.ts';
+import { ClaudeCliRunner } from '../adapters/claude-cli/runner.ts';
+import { RoleConfigResolver } from '../adapters/claude-cli/role-config.ts';
 import { GitRepo } from '../adapters/git/repo.ts';
 import { HostRunner, killSteps } from '../adapters/host/runner.ts';
 import { PodmanRunner } from '../adapters/podman/runner.ts';
@@ -18,12 +20,13 @@ import type { Clock } from '../core/ports/clock.ts';
 import type { WindowReader } from '../core/ports/window-reader.ts';
 import { systemClock } from './clock.ts';
 import { loadConfig, type Config } from './config.ts';
-import { ensureHome, resolveHome, type HomePaths } from './home.ts';
+import { ensureHome, PACKAGE_ROLES, resolveHome, writeAntipodShim, type HomePaths } from './home.ts';
 import { createLogger, type AppLogger, type Logger } from './logger.ts';
 import { acquirePidLock } from './pid-lock.ts';
 import { Registration, REGISTER_USAGE } from './registration.ts';
 import { readInstanceSecrets } from './secrets.ts';
 import { SOCKET_FILE, startStepSocket, type StepSocket } from './step-socket.ts';
+import { Stages } from './stages.ts';
 import { recoverSteps, Steps } from './steps.ts';
 
 export type StopSignal = 'SIGTERM' | 'SIGINT';
@@ -52,6 +55,8 @@ export interface Daemon {
   readonly registration: Registration;
   /** Runs Recipe steps (AD-7); `antipod step` reaches it through the socket. */
   readonly steps: Steps;
+  /** Launches and cancels Stages (AD-4); the `start_stage` and `cancel_stage` handlers. */
+  readonly stages: Stages;
   config(): Config;
   /** Re-reads `config.yaml`; keeps the previous config when it is invalid. Returns whether it applied. */
   reload(): boolean;
@@ -73,6 +78,10 @@ export interface BootOptions {
   timeZone?: string;
   /** The podman binary for container steps; `podman` on PATH by default. */
   podman?: string;
+  /** The `claude` binary for Stages, looked up on the Stage's `PATH`; `claude` by default. */
+  claude?: string;
+  /** SIGINT-to-SIGTERM grace of a stopped Stage; 30 s by default (AD-4). Tests shorten it. */
+  stageKillGraceMs?: number;
 }
 
 /** No reading: the usage gate stays open (AD-12 fallback arrives with the estimator). */
@@ -113,6 +122,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   let messenger: TelegramMessenger | undefined;
   let registration: Registration;
   let steps: Steps;
+  let stages: Stages;
   let stepSocket: StepSocket | undefined;
   /** `/register` jobs in flight; `stop()` waits for them before the database closes. */
   const jobs = new Set<Promise<void>>();
@@ -203,7 +213,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       log: logger,
       policy: () => ({ limits: config.limits, usage: config.usage }),
     });
-    // The usage-window launch gate (AD-11); start_stage itself is registered with the claude-cli adapter (story 1-7).
+    // The usage-window launch gate (AD-11), in front of every Stage launch.
     executor.setGuard(['start_stage'], scheduler.launchGuard);
     // Step runners (AD-7, AD-19): the capability map and instance secrets are read per step, so SIGHUP applies.
     const stepsDir = join(paths.data, 'steps');
@@ -217,6 +227,29 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       log: logger,
     });
     steps = new Steps({ store, repo: gitRepo, dataDir: paths.data, secretsDir: paths.secrets, runners: { container: podman, host }, clock, log: logger });
+    // Stages (AD-4, AD-6, AD-15): `antipod` on every Stage's PATH, Role Config layered package ← home ← repo.
+    writeAntipodShim(paths);
+    stages = new Stages({
+      store,
+      coordinator,
+      runner: new ClaudeCliRunner({
+        clock,
+        log: logger,
+        ...(options.claude === undefined ? {} : { claude: options.claude }),
+        ...(options.stageKillGraceMs === undefined ? {} : { killGraceMs: options.stageKillGraceMs }),
+      }),
+      resolver: new RoleConfigResolver({ packageDir: PACKAGE_ROLES, homeDir: paths.roles }),
+      repo: gitRepo,
+      home: paths.root,
+      dataDir: paths.data,
+      secretsDir: paths.secrets,
+      runBin: paths.runBin,
+      config: () => ({ roles: config.roles, agent: config.agent }),
+      baseEnv: options.env ?? process.env,
+      log: logger,
+    });
+    executor.register('start_stage', (effect) => stages.startStage(effect));
+    executor.register('cancel_stage', (effect) => stages.cancelStage(effect));
     // Steps first (AD-18): leased processes and step containers are gone before anything relaunches.
     const stepRecovery = await recoverSteps({
       store,
@@ -291,6 +324,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     messenger,
     registration,
     steps,
+    stages,
     tick: onTick,
     config: () => config,
     reload() {
@@ -318,6 +352,8 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
         await registration.idle();
         await messenger?.stop();
         await scheduler.idle();
+        // Running Stages are stopped and apply nothing; boot recovery fails them `restart` (AD-18).
+        await stages.stop();
         // Let queued transactions and the drain in flight finish before the database closes; nothing new
         // starts, and pending effects replay at next boot (AD-18).
         await coordinator.idle();

@@ -1,0 +1,5 @@
+# Role Config (spine AD-15). timeout, retries and max_turns are left to config.yaml roles.validator
+# (config-defaults.md); set them here, in $ANTIPOD_HOME/roles/validator/role.yaml or in the repo's
+# .antipod/roles/validator/role.yaml to override.
+output_schema: validator
+permission_mode: dontAsk

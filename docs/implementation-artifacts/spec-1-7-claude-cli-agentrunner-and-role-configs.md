@@ -2,7 +2,8 @@
 title: 'Claude CLI AgentRunner and Role Configs'
 type: 'feature'
 created: '2026-11-14'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'f3d3f02'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -79,12 +80,12 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/core/domain/stage-output/`, `src/core/domain/role.ts`, `src/core/ports/agent-runner.ts`, `src/core/domain/events.ts` -- schemas, port, usage in events -- AD-4
-- [ ] `src/adapters/sqlite/migrations/0007-stage-retries.ts`, `index.ts`, `src/core/coordinator/coordinator.ts`, Store -- resolved retries on the Stage -- AD-4, AD-15
-- [ ] `roles/*/` -- five shipped Roles with config-defaults values left to `config.yaml` -- AD-15, CAP-20
-- [ ] `src/adapters/claude-cli/role-config.ts`, `src/adapters/claude-cli/runner.ts` -- resolver and launcher -- AD-4, AD-15, AD-22
-- [ ] `src/app/config.ts`, `src/app/home.ts`, `src/app/stages.ts`, `src/app/daemon.ts` -- handlers and wiring -- AD-3, AD-6
-- [ ] `test/fixtures/fake-claude/claude`, `test/adapters/claude-cli/*.test.ts`, `test/app/stages.test.ts`, `test/core/coordinator/transitions.test.ts` -- one test per matrix row, argv/env assertions -- AD-24
+- [x] `src/core/domain/stage-output/`, `src/core/domain/role.ts`, `src/core/ports/agent-runner.ts`, `src/core/domain/events.ts` -- schemas, port, usage in events -- AD-4
+- [x] `src/adapters/sqlite/migrations/0007-stage-retries.ts`, `index.ts`, `src/core/coordinator/coordinator.ts`, Store -- resolved retries on the Stage -- AD-4, AD-15
+- [x] `roles/*/` -- five shipped Roles with config-defaults values left to `config.yaml` -- AD-15, CAP-20
+- [x] `src/adapters/claude-cli/role-config.ts`, `src/adapters/claude-cli/runner.ts` -- resolver and launcher -- AD-4, AD-15, AD-22
+- [x] `src/app/config.ts`, `src/app/home.ts`, `src/app/stages.ts`, `src/app/daemon.ts` -- handlers and wiring -- AD-3, AD-6
+- [x] `test/fixtures/fake-claude/claude`, `test/adapters/claude-cli/*.test.ts`, `test/app/stages.test.ts`, `test/core/coordinator/transitions.test.ts` -- one test per matrix row, argv/env assertions -- AD-24
 
 **Acceptance Criteria:**
 - Given a queued Task that the scheduler starts, when the daemon drains effects with the fake `claude` returning Implementer `done`, then the Stage row goes `starting → running → succeeded`, the transcript file exists, and the Task advances with usage recorded in the `stage_events` payload.
@@ -107,3 +108,44 @@ context:
 **Manual checks (if no CLI):**
 - With a scratch `ANTIPOD_HOME` and the fake `claude` first on PATH, a started Task's `data/stages/<id>.jsonl` holds the canned stream and `/log`-ready events are in `stage_events`.
 - Once, with real `claude` and a scratch `ANTIPOD_HOME` (Owner-run): a Stage launched with the shipped Implementer Role cannot edit `.antipod/tasks/x.yaml`, ignores an `allow: ["Bash(*)"]` planted in the worktree's `.claude/settings.local.json`, and lists no MCP server beyond the Role's `mcp.json`; this also confirms the `--setting-sources` value that loads no source.
+
+## Review Triage Log
+
+Pass 1 (2026-11-15): blind (B), edge-case (E) and verification-gap (V) layers.
+
+| # | Finding | Verdict | Evidence | Route |
+|---|---------|---------|----------|-------|
+| 1 | B, E: stdout chunks decoded one by one corrupt split UTF-8 characters | medium | `chunk.toString('utf8')` per chunk in `runner.ts`; Owner text is often non-ASCII | patch |
+| 2 | E: transcript WriteStream has no `error` listener | medium | An unhandled stream `error` (ENOSPC, EACCES) throws and ends the daemon | patch |
+| 3 | E: `mkdirSync`/`spawn` can throw synchronously out of `run()` | low | The call sits outside `startStage`'s try, so the Stage stays `starting` | patch |
+| 4 | B, E: a valid `result` is discarded as `timeout` when the process lingers | low | `outcomeOf` checks `timedOut` first; direct reorder | patch |
+| 5 | B, E: Evidence mode passes with no `evidence_verdicts` | medium | `[].every(...)` is true, so nothing judged reads as verified | patch |
+| 6 | B: Validator `verdict` not checked against `findings` | medium | Schema accepts `pass` with a blocking finding; `eventForOutput` trusts `verdict` | patch |
+| 7 | B, E: rejected `stage_started` swallowed silently | low | `started.catch(() => undefined)` twice; direct fix is logging | patch |
+| 8 | E: output hook that throws leaves the Stage `running` | low | `#deliver` has no catch; hooks arrive in 1-8..1-10 | patch |
+| 9 | E: permission vars not realpath'd | maybe-false | Whether claude matches rules against resolved paths is unknown; resolving is strictly safer and trivial | patch |
+| 10 | B, E: `{{OTHER_WORKTREES}}` rules skip other placeholders, the unknown check, and use a string replacement | low | `expandPermissions` branch; direct correction | patch |
+| 11 | B: Implementer cannot delete or move files | medium | `dontAsk` with no `git rm`/`git mv` allow; ordinary changes need them | patch |
+| 12 | B: Evidence Producer may edit the worktree after validation; prompt omits `antipod-evidence` | medium | `Edit(/{{WORKTREE}}/**)` in its allow list; it only needs `antipod step` and `antipod-evidence` (AD-20) | patch |
+| 13 | E: fake `claude` exits right after writing stdout | low | `process.exit` can cut an asynchronous pipe write; direct fix | patch |
+| 14 | V: shutdown with a running Stage untested | medium | Filed evidence: no test reaches `Stages.stop()` with a live Stage | patch |
+| 15 | V: own-worktree exclusion from `OTHER_WORKTREES` untested on the launch path | medium | Filed evidence: no test reads the materialized `permissions.json` | patch |
+| 16 | V: repo layer through `Stages` (config_sha) untested | medium | Filed evidence: every Stages test has `config_sha` null | patch |
+| 17 | V: Intake `_main` cwd and draft env untested | low | Filed evidence: no Intake launch in tests | patch |
+| 18 | V: relaunch guard after `#prepare` untested | low | Filed as defer; a gated resolver stub is cheap with the injected resolver | patch |
+| 19 | V: api-key mode without a key untested | low | Filed evidence | patch |
+| 20 | B: env-key assertion filters its expected list by `key in env` | low | Barely constrains `LANG`/`TMPDIR` | patch |
+| 21 | B: failure detail reaches only the log; Owner sees "last failure: launch" | medium | The frozen matrix says "with the reason logged" and reasons are fixed names; changing it edits the spec | reject (Owner follow-up) |
+| 22 | B: launch errors that cannot heal are retried | low | The frozen matrix row "Launch throws … retried, then Stuck" | reject |
+| 23 | B, E: no SIGKILL after SIGTERM; a group member holding stdout delays `close`; background processes outlive the Stage | maybe-false | claude exits on SIGTERM (memlog) and shipped Bash rules allow no background jobs; settle with real `claude` | defer |
+| 24 | B: Stage processes are not tracked, so a daemon crash can leave the old `claude` running beside the relaunch | maybe-false | The orphan loses its stdout pipe and likely dies on its next stream-json write; settle by killing the daemon mid-Stage with real `claude` | defer |
+| 25 | B: every Role reads all `data/steps/**`; `OTHER_WORKTREES` is a launch snapshot | low | Step dirs are keyed by step run, not Task, so no path rule can scope them; a later worktree belongs to a new Task | reject |
+| 26 | B: `Stages.stop()` does not await launches still in `#prepare` | low | Narrow shutdown window; fix adds tracked state | reject |
+| 27 | B, E: `roles` catchall accepts misspelled Role names | low | An open Role set cannot detect typos | reject |
+| 28 | B: spec `in-review` vs sprint `in-progress` | false | The workflow moves the sprint entry at step 5 | reject |
+| 29 | E: Task row missing at launch or delivery | false | No code path deletes `tasks` rows | reject |
+| 30 | E: mapped event ignored by the Coordinator leaves the Stage `running` | maybe-false | Validator runs only in `validating`/`verifying` (STAGE_ROLES); a pause or cancel aborts first; would be low | reject |
+| 31 | E: Validator output outside `validating`/`verifying` | false | `STAGE_ROLES` launches the Validator only there | reject |
+| 32 | E: timeout over 2^31-1 ms clamps to 1 ms | low | A 25-day timeout is not a real setting | reject |
+| 33 | E: `start_stage` re-run for a live Stage | false | Effects run once per process; a re-run sees the row `running` and skips | reject |
+| 34 | E: `readIfExists` rethrows EISDIR/EACCES raw | low | Still becomes `stage_failed(launch)` with the message | reject |

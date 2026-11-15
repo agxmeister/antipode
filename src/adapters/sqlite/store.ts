@@ -44,9 +44,9 @@ const TASK_COLUMNS = [
 ] as const;
 
 const TASK_PATCHABLE: ReadonlySet<string> = new Set(TASK_COLUMNS.filter((c) => !['id', 'project_id', 'kind', 'created_at'].includes(c)));
-const STAGE_PATCHABLE: ReadonlySet<string> = new Set(['status', 'reason', 'started_at', 'ended_at']);
+const STAGE_PATCHABLE: ReadonlySet<string> = new Set(['status', 'reason', 'started_at', 'ended_at', 'retries']);
 
-const STAGE_COLUMNS = ['id', 'task_id', 'role', 'attempt', 'status', 'reason', 'created_at', 'started_at', 'ended_at'] as const;
+const STAGE_COLUMNS = ['id', 'task_id', 'role', 'attempt', 'status', 'reason', 'created_at', 'started_at', 'ended_at', 'retries'] as const;
 const EVENT_COLUMNS = ['id', 'task_id', 'stage_id', 'event_type', 'payload', 'status', 'ignore_reason', 'from_state', 'to_state', 'created_at'] as const;
 
 function insertSql(table: string, columns: readonly string[]): string {
@@ -368,7 +368,7 @@ export class SqliteStore implements Store {
   }
 
   insertStage(stage: Stage): void {
-    this.#stmt.insertStage.run(stage);
+    this.#stmt.insertStage.run({ ...stage, retries: stage.retries ?? null });
   }
 
   getStage(id: string): Stage | undefined {

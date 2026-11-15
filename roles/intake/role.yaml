@@ -1,0 +1,5 @@
+# Role Config (spine AD-15). timeout, retries and max_turns are left to config.yaml roles.intake
+# (config-defaults.md); set them here, in $ANTIPOD_HOME/roles/intake/role.yaml or in the repo's
+# .antipod/roles/intake/role.yaml to override.
+output_schema: owner-instruction
+permission_mode: dontAsk

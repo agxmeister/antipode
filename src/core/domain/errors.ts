@@ -52,3 +52,17 @@ export class RepoUnreachableError extends AntipodError {
     this.detail = detail;
   }
 }
+
+/** No Role Config layer defines the Role a Stage asks for (AD-15). */
+export class UnknownRoleError extends AntipodError {
+  constructor(role: string) {
+    super('unknown_role', `no Role ${role}: no layer has roles/${role}/`);
+  }
+}
+
+/** A Role file is missing in every layer or does not validate (AD-15). */
+export class RoleConfigInvalidError extends AntipodError {
+  constructor(role: string, detail: string) {
+    super('role_config_invalid', `Role ${role}: ${detail}`);
+  }
+}

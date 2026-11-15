@@ -60,12 +60,18 @@ describe('config', () => {
     expect(config.logging.level).toBe('debug');
   });
 
-  it('layers a partial roles override on the role defaults and rejects an unknown role', () => {
+  it('layers a partial roles override on the role defaults; a new Role needs all three values', () => {
     const config = parseConfig({ owner: { telegram_user_id: 1 }, roles: { implementer: { retries: 0 } } });
     expect(config.roles.implementer).toEqual({ timeout_ms: 2_700_000, retries: 0, max_turns: 150 });
     expect(config.roles.triage.retries).toBe(2);
-    expect(issuesOf(() => parseConfig({ owner: { telegram_user_id: 1 }, roles: { reviewer: {} } }))).toEqual([
-      'roles.reviewer',
+    const added = parseConfig({ owner: { telegram_user_id: 1 }, roles: { reviewer: { timeout_ms: 60_000, retries: 1, max_turns: 10 } } });
+    expect(added.roles['reviewer']).toEqual({ timeout_ms: 60_000, retries: 1, max_turns: 10 });
+    expect(issuesOf(() => parseConfig({ owner: { telegram_user_id: 1 }, roles: { reviewer: { retries: 1 } } }))).toEqual([
+      'roles.reviewer.timeout_ms',
+      'roles.reviewer.max_turns',
+    ]);
+    expect(issuesOf(() => parseConfig({ owner: { telegram_user_id: 1 }, roles: { implementer: { retires: 1 } } }))).toEqual([
+      'roles.implementer.retires',
     ]);
   });
 

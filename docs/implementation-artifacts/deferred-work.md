@@ -39,3 +39,9 @@
 - source_spec: `docs/implementation-artifacts/spec-1-6-pid-reuse-guard.md`
   summary: Check that a host step's recorded start time survives a wall-clock step on the Linux VM host, or widen `START_TOLERANCE_S`.
   evidence: unverified, medium if true. Linux `ps` derives start from boot time plus ticks, so an NTP step between spawn and boot recovery could push a live step outside the 2 s tolerance and spare it while its lease is cleared. Settle by stepping the clock on the VM host with a live step (review pass 1, #5).
+- source_spec: `docs/implementation-artifacts/spec-1-7-claude-cli-agentrunner-and-role-configs.md`
+  summary: Make the Stage runner end the whole process group (SIGKILL after a second grace, resolve on leader exit) instead of trusting `claude` to exit on SIGTERM and close stdout.
+  evidence: Unverified (would be medium): a group member ignoring SIGTERM or holding stdout keeps `run()` and daemon shutdown pending. Settle with real `claude` by leaving a SIGTERM-ignoring child in a Stage's group.
+- source_spec: `docs/implementation-artifacts/spec-1-7-claude-cli-agentrunner-and-role-configs.md`
+  summary: Record Stage pids like host steps so boot recovery kills an orphaned `claude` before relaunching in the same worktree.
+  evidence: Unverified (would be medium): after a daemon crash AD-18 fails the Stage `restart` and relaunches while the old process may still run; it probably dies on EPIPE at its next stream-json write. Settle by SIGKILLing the daemon mid-Stage with real `claude`.

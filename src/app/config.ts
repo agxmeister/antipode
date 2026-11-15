@@ -7,7 +7,11 @@ import { ConfigInvalidError, type ConfigIssue } from '../core/domain/errors.ts';
 const positiveInt = z.int().positive();
 const nonNegativeInt = z.int().nonnegative();
 
-/** `roles.<role>`: the `role.yaml` values of config-defaults.md (file layering per AD-15 is story 1-7). */
+/**
+ * `roles.<role>`: the defaults of the `role.yaml` values of config-defaults.md; a Role's `role.yaml`
+ * overrides them (AD-15). The five shipped Roles have defaults; another Role may be configured here
+ * with all three values.
+ */
 function roleSchema(defaults: { timeout_ms: number; retries: number; max_turns: number }) {
   return z
     .strictObject({
@@ -68,13 +72,15 @@ export const configSchema = z.strictObject({
     })
     .prefault({}),
   roles: z
-    .strictObject({
+    .object({
       intake: roleSchema({ timeout_ms: 5 * MINUTE, retries: 2, max_turns: 25 }),
       implementer: roleSchema({ timeout_ms: 45 * MINUTE, retries: 2, max_turns: 150 }),
       validator: roleSchema({ timeout_ms: 20 * MINUTE, retries: 2, max_turns: 60 }),
       'evidence-producer': roleSchema({ timeout_ms: 30 * MINUTE, retries: 2, max_turns: 80 }),
       triage: roleSchema({ timeout_ms: 5 * MINUTE, retries: 2, max_turns: 15 }),
     })
+    // A new Role directory is a new Role (AD-15); its defaults, when given here, are complete.
+    .catchall(z.strictObject({ timeout_ms: positiveInt, retries: nonNegativeInt, max_turns: positiveInt }))
     .prefault({}),
   backup: z
     .strictObject({

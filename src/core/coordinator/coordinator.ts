@@ -192,6 +192,18 @@ export class Coordinator {
   }
 
   /**
+   * Stores the resolved Role Config `retries` on a Stage attempt when it launches (AD-4, AD-15), so
+   * the retry rule of its `stage_failed` reads it. Not an event: no `stage_events` row.
+   */
+  setStageRetries(stageId: string, retries: number): Promise<void> {
+    return this.#enqueue(() =>
+      this.#store.transaction(() => {
+        this.#store.updateStage(stageId, { retries });
+      }),
+    );
+  }
+
+  /**
    * Queues one `notify` effect of `noticeKind` for a Task unless one with the same `key` already
    * exists in any status; `key` is stored as `payload.key`. Resolves whether it inserted.
    */
