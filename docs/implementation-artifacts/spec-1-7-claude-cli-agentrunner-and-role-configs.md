@@ -2,7 +2,7 @@
 title: 'Claude CLI AgentRunner and Role Configs'
 type: 'feature'
 created: '2026-11-14'
-status: 'draft'
+status: 'ready-for-dev'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
