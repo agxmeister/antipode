@@ -45,3 +45,6 @@
 - source_spec: `docs/implementation-artifacts/spec-1-7-claude-cli-agentrunner-and-role-configs.md`
   summary: Record Stage pids like host steps so boot recovery kills an orphaned `claude` before relaunching in the same worktree.
   evidence: Unverified (would be medium): after a daemon crash AD-18 fails the Stage `restart` and relaunches while the old process may still run; it probably dies on EPIPE at its next stream-json write. Settle by SIGKILLing the daemon mid-Stage with real `claude`.
+- source_spec: `docs/implementation-artifacts/spec-1-7-claude-cli-agentrunner-and-role-configs.md`
+  summary: Carry a Stage failure's detail (launch error message, exit code and stderr tail, the failing schema path) into `stage_failed` and the Stuck notice, so the Owner sees why without reading logs.
+  evidence: Review pass 1 finding #21; Owner asked for it as a follow-up (2026-11-15). Today `stage_failed` carries only the fixed reason name, so the Stuck notice reads "last failure: launch" while the cause (for example "no Role reviewer", "ANTHROPIC_API_KEY is not set") is only in the log. Needs a spec change: the 1-7 frozen matrix says "with the reason logged".
