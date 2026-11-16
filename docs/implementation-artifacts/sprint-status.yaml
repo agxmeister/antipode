@@ -43,7 +43,7 @@ development_status:
   1-5-git-adapter-recipe-validation-and-registration: done
   1-6-step-runners: done
   1-7-claude-cli-agentrunner-and-role-configs: done
-  1-8-intake-drafts-from-text-and-the-inbox: backlog
+  1-8-intake-drafts-from-text-and-the-inbox: ready-for-dev
   1-9-implement-validate-and-triage-loop: backlog
   1-10-evidence-production-ingest-and-rendering: backlog
   1-11-review-sequence-accept-and-correction: backlog
