@@ -86,7 +86,7 @@ Behavioral rules only. Visual specs are in `DESIGN.md` → Components.
 
 | Component | Behavioral rules |
 |---|---|
-| **Draft card** | Shows the goal, numbered criteria and the Evidence kind of each criterion, and fits one phone screen (FR-7). Up to 2 questions, each with quick-answer buttons when the answer is closed. **Approve** appears only when every question is answered and every criterion has feasible Evidence (FR-8). Until then a line reads `Approve after: answer Q1`. Replying with text or voice revises the draft, and the card is edited in place, not reposted. **Discard** needs no confirmation and can be undone from the edited card for 1 min. `[ASSUMPTION]` |
+| **Draft card** | Shows the goal, numbered criteria and the Evidence kind of each criterion, and fits one phone screen (FR-7). Up to 2 questions, each with quick-answer buttons when the answer is closed. **Approve** appears only when every question is answered and every criterion has feasible Evidence (FR-8). Until then a line reads `Approve after: answer Q1`. Replying with text or voice revises the draft, and the card is edited in place, not reposted. **Discard** needs no confirmation; the edited card reads `Discarded · undo within 1 min` with a single `Undo` button and becomes `Discarded` with no buttons when the minute is up. `[ASSUMPTION]` The card carries no Task number until approval, when the number is assigned. |
 | **Evidence message** | One message per criterion: a photo, a video (≤60 s) or a before/after composite. If compositing fails, two separately labelled photos (`DESIGN.md` → before-after-composite). Never an album. Caption per `{components.evidence-caption.pattern}`. All Evidence messages are sent silently; only the Review card makes a sound. |
 | **Demo message** | An APK/STL sent as a Telegram file, or a WebGL/preview link, captioned `Demo · ${what to try}`. Files over the upload limit become authenticated links `[POST-MVP]`; in the MVP the caption reads `Demo · ${what to try} · file too large, not sent`. Sent silently, after the Evidence and before the card. |
 | **Review card** | Always the last message of a Review, so the buttons are under the thumb. Rows: 1) `Accept` · `Request changes`; 2) Parking Lot promotion (see below). After any tap the card is **edited in place**. On Accept, the keyboard becomes `[Undo]` for 10 s and is then removed. On Undo, the card is edited back to `Accept` · `Request changes`; it is still the same Review round. On Request changes, the keyboard is removed at once. A state line is appended (`✅ Accepted · integrating` → `📦 Released 0.4.2`, or `✅ Merged · no release step`). Blocks that don't apply (no Demo, empty Parking Lot, no before/after) are omitted without a placeholder. Release confirmation is also sent as a silent reply to the card, so it appears in the chat flow (UJ-2). |
@@ -112,6 +112,7 @@ Behavioral rules only. Visual specs are in `DESIGN.md` → Components.
 | Button tapped | Tapped card | Telegram toast within 5 s (`Accepted. Integrating.`). The card is edited at the same time. |
 | Draft awaiting answers | Draft card | `Approve after: …` line instead of the Approve button. |
 | Infeasible criterion | Draft card | The criterion line reads `AC3 ⚠️ can't evidence haptics · proposed: vibration call log (degraded)`, with `Use proposal` / `Drop AC3` buttons. |
+| Draft discarded | Draft card | `Discarded · undo within 1 min` with `Undo`; after 1 min `Discarded`, no buttons. |
 | Running | Status list | `⏳ #12 Rest timer · implementing (lap 2/5)`. No proactive messages while running. |
 | Paused for usage window | Silent notice, once per pause | `⏸ #12 waiting for usage window · resumes ~14:20`. A silent `Resumed` notice follows. Never shown as a failure (FR-17). |
 | Paused by Owner | Card edit + status | `⏸ Paused by you`. `/resume` or reply `resume`. |
@@ -185,9 +186,9 @@ Protagonist: **agxmeister**, the Owner, on the phone in short gaps. The flows fo
 
 1. In `Antipode · Training`, agxmeister sends a voice note: "add a rest timer after each set, 90 seconds default."
 2. The bot reacts `👀` within 5 s.
-3. A Draft card arrives (silent): `#12 Rest timer after each set` with 3 criteria and Evidence kinds. Q1: `Can the default be changed per exercise?` [Yes] [Not yet]
+3. A Draft card arrives (silent): `Rest timer after each set · draft` with 3 criteria and Evidence kinds. Q1: `Can the default be changed per exercise?` [Yes] [Not yet]
 4. agxmeister taps **Not yet**. The card is edited: the answer is folded in and **Approve** appears.
-5. **Climax:** they tap **Approve**. The toast reads `Queued.` and the card shows `⏳ Queued · starts next`. The Task is now the factory's job.
+5. **Climax:** they tap **Approve**. The toast reads `Queued.` and the card is edited to `#12 · Rest timer after each set` with `⏳ Queued · starts next`. The Task is now the factory's job.
 
 Edge: a criterion can't be evidenced. The card shows `⚠️` with a proposed substitute and **Use proposal** / **Drop AC3** buttons, and Approve stays hidden until one is chosen.
 

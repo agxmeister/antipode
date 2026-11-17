@@ -48,7 +48,8 @@ components:
     titlePattern: '<b>#${task-id} · ${task-title}</b>'
     maxProseLines: 5
   draft-card:
-    titlePattern: '<b>#${task-id} · ${task-title}</b> · draft'
+    titlePattern: '<b>${task-title}</b> · draft'
+    approvedTitlePattern: '<b>#${task-id} · ${task-title}</b>'
   interpretation-card:
     titlePattern: '<b>#${task-id}</b> · understood as:'
   stuck-card:
@@ -137,12 +138,13 @@ Each card lists its blocks top to bottom. "Buttons" are inline-keyboard rows; on
 
   Prose beyond the labels is capped at `{components.review-card.maxProseLines}` lines (FR-26). After a tap, the buttons are removed and a state line is appended.
 - **Draft card.**
-  1. Title `{components.draft-card.titlePattern}`.
+  1. Title `{components.draft-card.titlePattern}`; after approval `{components.draft-card.approvedTitlePattern}`.
   2. `Goal: ${one line}`.
   3. Criteria, numbered: `AC${n} ${label} · ${evidence kind}`. An infeasible criterion shows `⚠️` and its proposed substitute.
   4. Questions: `❓ Q${n} ${question}`.
   5. `Approve after: …` line, while anything is still open.
   6. Buttons, one row per question: quick answers. Then one row per infeasible criterion: `Use proposal` · `Drop AC${n}`. Last row: `Approve` (once everything is resolved) · `Discard`.
+  7. After a closing tap, the buttons give way to a state line: `⏳ Queued · starts next` after Approve (no buttons); `Discarded · undo within 1 min` with a single `Undo` button after Discard; `Discarded` with no buttons once the undo window expires.
 - **Interpretation card.**
   1. Title `{components.interpretation-card.titlePattern}`.
   2. One line per instruction (`Drop AC2` · `New draft: "…"`).

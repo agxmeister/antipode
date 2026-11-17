@@ -17,6 +17,7 @@ Initial values for `$ANTIPOD_HOME/config.yaml` and the shipped `roles/<role>/rol
 | `intake.context_messages` | 10 | Owner and bot messages of the Task carried into the Intake brief |
 | `outbox.retries` | 5 | Before a delivery-failure notice |
 | `telegram.stale_after_ms` | 300000 | Older updates answered by reply; stale `/peek` dropped |
+| `git.fetch_interval_ms` | 60000 | Each Project is fetched at boot and then on this interval; the inbox is scanned after every fetch |
 
 ## Roles (`role.yaml`)
 
