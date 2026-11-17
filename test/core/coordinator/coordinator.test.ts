@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { Coordinator, ProjectNotFoundError, TaskNotFoundError, type CoordinatorPolicy } from '../../../src/core/coordinator/coordinator.ts';
+import { writeDraft } from '../../../src/core/coordinator/drafts.ts';
+import type { Event } from '../../../src/core/domain/events.ts';
 import { ULID_PATTERN } from '../../../src/core/domain/ids.ts';
 import { fakeClock } from '../../helpers/clock.ts';
 import { openTestStore, type TestStore } from '../../helpers/store.ts';
+
+const APPROVED: Event = { type: 'approved', config_sha: null, evidence_kinds: ['screenshot'] };
 
 const POLICY: CoordinatorPolicy = {
   limits: { iteration_budget: 5, undo_accept_ms: 10_000, undo_discard_ms: 60_000 },
@@ -23,13 +27,15 @@ async function setup(policy: CoordinatorPolicy = POLICY) {
   const coordinator = new Coordinator({ store: ts.store, clock, policy: () => policy, onEffectsCommitted: () => committed.push(1) });
   const project = await coordinator.createProject('training');
   const task = await coordinator.createTask({ project_id: project.id, kind: 'feature' });
+  // A draft needs a feasible contract before `approved` applies (CAP-8).
+  writeDraft(ts.store, task.id, { goal: 'a goal', criteria: [{ text: 'it shows', required_evidence: 'screenshot' }], questions: [] }, ['screenshot'], clock.now().toISOString());
   return { ...ts, clock, coordinator, project, task, committed };
 }
 
 /** Walks a fresh draft Task to `implementing` with its first Stage running. */
 async function toImplementing(c: Awaited<ReturnType<typeof setup>>) {
   await c.coordinator.applyEvent(c.task.id, { type: 'draft_ready' });
-  await c.coordinator.applyEvent(c.task.id, { type: 'approved' });
+  await c.coordinator.applyEvent(c.task.id, APPROVED);
   await c.coordinator.applyEvent(c.task.id, { type: 'scheduler_start' });
   const task = c.store.getTask(c.task.id)!;
   await c.coordinator.applyEvent(task.id, { type: 'stage_started', stage_id: task.current_stage_id! });
@@ -59,11 +65,11 @@ describe('Coordinator (AD-3)', () => {
   it('queued + scheduler_start: state, budget, Stage row, event row and start_stage effect in one transaction', async () => {
     const c = await setup();
     await c.coordinator.applyEvent(c.task.id, { type: 'draft_ready' });
-    await c.coordinator.applyEvent(c.task.id, { type: 'approved' });
+    await c.coordinator.applyEvent(c.task.id, APPROVED);
     expect(c.store.getTask(c.task.id)).toMatchObject({ state: 'queued', task_no: 1 });
 
     const result = await c.coordinator.applyEvent(c.task.id, { type: 'scheduler_start' });
-    expect(result).toEqual({ applied: true, state: 'implementing', effects: 1 });
+    expect(result).toEqual({ applied: true, state: 'implementing', effects: 2 });
     const task = c.store.getTask(c.task.id)!;
     expect(task).toMatchObject({ state: 'implementing', budget_used: 1 });
     const stages = c.store.stagesOfTask(task.id);
@@ -71,9 +77,14 @@ describe('Coordinator (AD-3)', () => {
     const events = c.store.stageEventsOfTask(task.id).filter((e) => e.event_type === 'scheduler_start');
     // A non-Stage event logs the Stage it found current (none here); the new Stage is on the effect.
     expect(events).toMatchObject([{ status: 'applied', from_state: 'queued', to_state: 'implementing', stage_id: null }]);
-    const effects = c.store.effectsOfTask(task.id);
-    expect(effects).toMatchObject([{ kind: 'start_stage', status: 'pending', effect: { stage_id: task.current_stage_id, role: 'implementer', attempt: 1 } }]);
-    expect(c.committed).toHaveLength(1);
+    const effects = c.store.effectsOfTask(task.id).slice(-2);
+    // The contract projection is committed before the Stage starts (AD-21).
+    expect(effects).toMatchObject([
+      { kind: 'commit_contract', status: 'pending', effect: { task_id: task.id } },
+      { kind: 'start_stage', status: 'pending', effect: { stage_id: task.current_stage_id, role: 'implementer', attempt: 1 } },
+    ]);
+    // One executor wake per transaction that queued effects: draft_ready, approved, scheduler_start.
+    expect(c.committed).toHaveLength(3);
   });
 
   it('an undefined pair changes nothing, is stored as ignored(invalid) and never throws', async () => {
@@ -107,7 +118,7 @@ describe('Coordinator (AD-3)', () => {
     expect(after.current_stage_id).not.toBe(first);
     expect(c.store.getStage(first)).toMatchObject({ status: 'failed', reason: 'timeout', ended_at: expect.any(String) });
     expect(c.store.getStage(after.current_stage_id!)).toMatchObject({ attempt: 2, status: 'starting', role: 'implementer' });
-    expect(c.store.effectsOfTask(task.id).map((e) => e.effect)).toMatchObject([
+    expect(c.store.effectsOfTask(task.id).map((e) => e.effect).filter((e) => e.kind === 'start_stage')).toMatchObject([
       { kind: 'start_stage', attempt: 1 },
       { kind: 'start_stage', attempt: 2 },
     ]);
@@ -201,10 +212,10 @@ describe('Coordinator (AD-3)', () => {
   it('two concurrent applyEvent calls are serialized: the log holds them in call order and the second saw the first state', async () => {
     const c = await setup();
     const first = c.coordinator.applyEvent(c.task.id, { type: 'draft_ready' });
-    const second = c.coordinator.applyEvent(c.task.id, { type: 'approved' });
+    const second = c.coordinator.applyEvent(c.task.id, APPROVED);
     const [r1, r2] = await Promise.all([first, second]);
-    expect(r1).toEqual({ applied: true, state: 'awaiting_approval', effects: 0 });
-    expect(r2).toEqual({ applied: true, state: 'queued', effects: 0 });
+    expect(r1).toEqual({ applied: true, state: 'awaiting_approval', effects: 1 });
+    expect(r2).toEqual({ applied: true, state: 'queued', effects: 2 });
     const log = c.store.stageEventsOfTask(c.task.id).map((e) => [e.event_type, e.from_state, e.to_state]);
     expect(log).toEqual([
       ['new_draft', null, 'draft'],

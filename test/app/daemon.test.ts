@@ -462,8 +462,13 @@ describe('daemon', () => {
       daemon.store.bindProjectChat(project.id, CHAT_ID);
       tg.pushUpdates(textUpdate(41, 'add a rest timer', { messageId: 9 }), textUpdate(42, 'spam', { from: 777, messageId: 10 }));
       await vi.waitFor(() => expect(daemon.store.getSetting('telegram.last_update_id')).toBe('42'));
+      // The Owner's text became a draft Task with its message on record for Intake (CAP-7); the stranger's did not.
+      const [draft] = daemon.store.tasksInStates(['draft', 'cancelled']);
+      expect(draft).toMatchObject({ project_id: project.id, kind: 'feature', task_no: null });
+      expect(daemon.store.intakeMessagesOf(draft!.id)).toMatchObject([{ sender: 'owner', text: 'add a rest timer', message_id: 9 }]);
       await daemon.stop('test');
-      expect(tg.callsOf('setMessageReaction')).toEqual([{ chat_id: CHAT_ID, message_id: 9, reaction: [{ type: 'emoji', emoji: '👀' }] }]);
+      expect(tg.callsOf('setMessageReaction')[0]).toEqual({ chat_id: CHAT_ID, message_id: 9, reaction: [{ type: 'emoji', emoji: '👀' }] });
+      expect(tg.callsOf('setMessageReaction').every((call) => call['message_id'] === 9)).toBe(true);
     });
 
     it('wires back_online and retire_card to the messenger', async () => {

@@ -190,4 +190,41 @@ describe('GitRepo (temporary local remote, AD-24)', () => {
     expect(await repo.addTaskWorktree('p', 12, 'rest-timer', base)).toBe(path);
     expect(git(path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('antipod/12-rest-timer');
   });
+
+  it('listTree lists the files under a directory at a SHA with their blob SHAs, symlinks excluded', async () => {
+    const { repo } = setup();
+    const remote = createTempRemote();
+    const sha = remote.commit({ 'antipod.yaml': validRecipe(), '.antipod/inbox/a.yaml': 'goal: g\n', '.antipod/inbox/sub/b story.md': '# b\n', '.antipod/tasks/1.yaml': 'x\n' });
+    symlinkSync('a.yaml', join(remote.dir, '.antipod', 'inbox', 'link.yaml'));
+    const later = remote.commit({});
+    await repo.ensureClone(remote.dir, 'training');
+    const entries = await repo.listTree('training', later, '.antipod/inbox');
+    expect(entries).toEqual([
+      { path: '.antipod/inbox/a.yaml', blob_sha: git(remote.dir, 'rev-parse', `${sha}:.antipod/inbox/a.yaml`) },
+      { path: '.antipod/inbox/sub/b story.md', blob_sha: git(remote.dir, 'rev-parse', `${sha}:.antipod/inbox/sub/b story.md`) },
+    ]);
+    expect(await repo.listTree('training', sha, '.antipod/missing')).toEqual([]);
+  });
+
+  it('commitInWorktree writes, removes and commits on the Branch; a repeat with nothing changed commits nothing', async () => {
+    const { repo } = setup();
+    const remote = createTempRemote();
+    const sha = remote.commit({ 'antipod.yaml': validRecipe(), '.antipod/inbox/a.yaml': 'goal: g\n' });
+    await repo.ensureClone(remote.dir, 'training');
+    const worktree = await repo.addTaskWorktree('training', 3, 'dark-mode', sha);
+    const files = { '.antipod/tasks/3.yaml': 'task: 3\n' };
+    const commit = await repo.commitInWorktree(worktree, files, ['.antipod/inbox/a.yaml'], 'antipod: contract v1');
+    expect(commit).toBe(git(worktree, 'rev-parse', 'HEAD'));
+    expect(git(worktree, 'log', '-1', '--format=%s %an')).toBe('antipod: contract v1 Antipode');
+    expect(git(worktree, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n')).toEqual(['.antipod/tasks/3.yaml', 'antipod.yaml']);
+    expect(await repo.commitInWorktree(worktree, files, ['.antipod/inbox/a.yaml'], 'antipod: contract v1')).toBeUndefined();
+    expect(git(worktree, 'rev-list', '--count', 'HEAD')).toBe('2');
+    await expect(repo.commitInWorktree(worktree, { '../escape.yaml': 'x' }, [], 'm')).rejects.toThrow(/outside the worktree/);
+    // Something already staged in the worktree stays out of the contract commit.
+    writeFileSync(join(worktree, 'stray.txt'), 'stray\n');
+    git(worktree, 'add', 'stray.txt');
+    await repo.commitInWorktree(worktree, { '.antipod/tasks/3.yaml': 'task: 3\nversion: 2\n' }, ['.antipod/inbox/a.yaml'], 'antipod: contract v2');
+    expect(git(worktree, 'show', '--name-only', '--format=', 'HEAD')).toBe('.antipod/tasks/3.yaml');
+    expect(git(worktree, 'diff', '--cached', '--name-only')).toBe('stray.txt');
+  });
 });

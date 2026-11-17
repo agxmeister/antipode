@@ -26,7 +26,8 @@ import { acquirePidLock } from './pid-lock.ts';
 import { Registration, REGISTER_USAGE } from './registration.ts';
 import { readInstanceSecrets } from './secrets.ts';
 import { SOCKET_FILE, startStepSocket, type StepSocket } from './step-socket.ts';
-import { Stages } from './stages.ts';
+import { Intake } from './intake.ts';
+import { INTAKE_ROLE, Stages } from './stages.ts';
 import { recoverSteps, Steps } from './steps.ts';
 
 export type StopSignal = 'SIGTERM' | 'SIGINT';
@@ -57,6 +58,8 @@ export interface Daemon {
   readonly steps: Steps;
   /** Launches and cancels Stages (AD-4); the `start_stage` and `cancel_stage` handlers. */
   readonly stages: Stages;
+  /** Drafts from Owner text and the inbox, the Draft card's commands and the Branch effects (CAP-6..9). */
+  readonly intake: Intake;
   config(): Config;
   /** Re-reads `config.yaml`; keeps the previous config when it is invalid. Returns whether it applied. */
   reload(): boolean;
@@ -123,6 +126,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   let registration: Registration;
   let steps: Steps;
   let stages: Stages;
+  let intake: Intake;
   let stepSocket: StepSocket | undefined;
   /** `/register` jobs in flight; `stop()` waits for them before the database closes. */
   const jobs = new Set<Promise<void>>();
@@ -142,6 +146,13 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     });
     executor = new EffectExecutor(store, clock, logger);
     const gitRepo = new GitRepo({ dataDir: paths.data, secretsDir: paths.secrets, log: logger });
+    intake = new Intake({ store, coordinator, repo: gitRepo, clock, config: () => config, log: logger });
+    const draftIntake = intake;
+    executor.register('scan_inbox', (effect) => draftIntake.scanInbox(effect));
+    executor.register('prepare_branch', async (effect) => {
+      await draftIntake.prepareBranch(effect);
+    });
+    executor.register('commit_contract', (effect) => draftIntake.commitContract(effect));
     const api = options.telegramApi ?? telegramApiFromSecrets(paths.secrets);
     if (api === undefined) {
       // No bot token: the daemon runs without Telegram and keeps notices on record in the log.
@@ -192,6 +203,9 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
           .finally(() => jobs.delete(job));
         jobs.add(job);
       });
+      // Untargeted Owner text and replies to a Draft card go to Intake; its buttons are Coordinator commands (AD-9).
+      telegram.onText((input) => draftIntake.onText(input));
+      for (const [command, definition] of draftIntake.callbacks()) telegram.registerCallback(command, definition);
       executor.register('notify', (effect, row) => telegram.notify(effect, row));
       executor.register('back_online', (effect, row) => telegram.backOnline(effect, row));
       executor.register('retire_card', (effect, row) => telegram.retireCard(effect, row));
@@ -244,10 +258,11 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       dataDir: paths.data,
       secretsDir: paths.secrets,
       runBin: paths.runBin,
-      config: () => ({ roles: config.roles, agent: config.agent }),
+      config: () => ({ roles: config.roles, agent: config.agent, intake: config.intake }),
       baseEnv: options.env ?? process.env,
       log: logger,
     });
+    stages.setOutputHook(INTAKE_ROLE, draftIntake.outputHook);
     executor.register('start_stage', (effect) => stages.startStage(effect));
     executor.register('cancel_stage', (effect) => stages.cancelStage(effect));
     // Steps first (AD-18): leased processes and step containers are gone before anything relaunches.
@@ -307,8 +322,12 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     if (stopped !== undefined) {
       return Promise.resolve();
     }
+    // Fetch and inbox scan per Project at boot and every git.fetch_interval_ms (AD-5).
+    const scans = intake.tick().catch((error: unknown) => {
+      logger.error({ event: 'inbox_scan_request_failed', ...errorFields(error) }, 'inbox_scan_request_failed');
+    });
     // Never rejects; failures are logged inside the scheduler.
-    return scheduler.tick();
+    return Promise.all([scans, scheduler.tick()]).then(() => undefined);
   };
   let stopped: Promise<void> | undefined;
   const tick = setInterval(() => void onTick(), DEADLINE_TICK_MS);
@@ -325,6 +344,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     registration,
     steps,
     stages,
+    intake,
     tick: onTick,
     config: () => config,
     reload() {

@@ -1,5 +1,7 @@
 import type { Api } from 'grammy';
+import { INTAKE_FAILED } from '../../core/coordinator/transitions.ts';
 import type { EffectOf, EffectRow } from '../../core/domain/effects.ts';
+import type { Task } from '../../core/domain/task.ts';
 import { ACTIVE_STATES } from '../../core/domain/task.ts';
 import type { OutboxDraft } from '../../core/domain/telegram.ts';
 import type { Clock } from '../../core/ports/clock.ts';
@@ -32,6 +34,8 @@ export const COMMAND_MENU: ReadonlyArray<{ command: string; description: string 
  * the refusal is logged and the reply still goes out. Raised for correct-course (story 1-4 report).
  */
 export const FAIL_REACTION = '❌';
+/** The reply when Intake gave up on an Owner message (EXPERIENCE State Patterns). */
+export const INTAKE_FAILED_REPLY = "Couldn't process that — send it again.";
 
 export interface TelegramConfig {
   /** `owner.telegram_user_id`. */
@@ -190,6 +194,10 @@ export class TelegramMessenger implements Messenger {
     if (chatId === undefined) {
       return;
     }
+    if (effect.notice_kind === INTAKE_FAILED && task !== undefined) {
+      await this.#intakeFailed(chatId, task, row);
+      return;
+    }
     const render = this.#notices.get(effect.notice_kind);
     if (render === undefined) {
       throw new Error(`no template for notice ${effect.notice_kind}`);
@@ -200,6 +208,24 @@ export class TelegramMessenger implements Messenger {
       this.#store.enqueueOutbox(chatId, drafts, row.effect_id, this.#clock.now().toISOString());
     });
     this.sender.wake();
+  }
+
+  /**
+   * Intake gave up (AD-10): the `👀` on the Owner's latest message of the draft becomes `❌` with a
+   * reply. A draft from an inbox file has no message to mark; the chat is told which file failed.
+   */
+  async #intakeFailed(chatId: number, task: Task, row: EffectRow): Promise<void> {
+    const message = this.#store
+      .intakeMessagesOf(task.id)
+      .filter((m) => m.sender === 'owner' && m.message_id !== null)
+      .at(-1);
+    if (message?.message_id != null) {
+      await this.failAck(chatId, message.message_id, INTAKE_FAILED_REPLY, row.effect_id);
+      return;
+    }
+    const source = this.#store.contractSourceOfTask(task.id);
+    const what = source === undefined ? 'that' : `<code>${escapeHtml(source.path)}</code>`;
+    this.enqueue(chatId, [textMessage(INTAKE_FAILED, `❌ Couldn't process ${what} — change it and push it again.`, { task_id: task.id })], row.effect_id);
   }
 
   async backOnline(effect: EffectOf<'back_online'>, row: EffectRow): Promise<void> {
@@ -240,13 +266,14 @@ export class TelegramMessenger implements Messenger {
     this.enqueue(chatId, drafts, null);
   }
 
-  async failAck(chatId: number, messageId: number, text: string): Promise<void> {
+  /** `effectId` makes the reply idempotent when an effect replays it (AD-3). */
+  async failAck(chatId: number, messageId: number, text: string, effectId: string | null = null): Promise<void> {
     try {
       await this.#api.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji: FAIL_REACTION as '👎' }]);
     } catch (error) {
       this.#log.warn({ event: 'telegram_ack_failed', chat_id: chatId, message_id: messageId, error: errorText(error) }, 'telegram_ack_failed');
     }
     const replied = this.#store.getTelegramMessage(chatId, messageId);
-    this.enqueue(chatId, [textMessage('fail_ack', escapeHtml(text), { task_id: replied?.task_id ?? null, reply_to: messageId })], null);
+    this.enqueue(chatId, [textMessage('fail_ack', escapeHtml(text), { task_id: replied?.task_id ?? null, reply_to: messageId })], effectId);
   }
 }

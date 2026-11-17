@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { evidenceKindSchema } from './recipe.ts';
 import { stageUsageSchema } from './stage.ts';
 import { taskStateSchema } from './task.ts';
 
@@ -28,13 +29,16 @@ function fromAgent<T extends string>(type: T) {
  * Every event the Coordinator applies to an existing Task: the AD-3 diagram arrows, the generic
  * events of the AD-3 Rule, and the Stage lifecycle events `stage_started` and `stage_failed`.
  * Creation (`new_draft`, `bootstrap_created`) has no Task to apply to and goes through
- * `Coordinator.createTask`.
+ * `Coordinator.createTask`, which records the source of a `new_draft` (text or inbox path and blob).
  */
 export const eventSchema = z.discriminatedUnion('type', [
-  // Draft and approval
-  plain('draft_ready'),
-  plain('draft_reply'),
-  plain('approved'),
+  // Draft and approval. `draft_ready` names the Intake Stage that wrote the draft; a contract file
+  // imported complete has no Stage and no `stage_id` (AD-5).
+  z.strictObject({ type: z.literal('draft_ready'), stage_id: stageId.optional(), usage }),
+  /** The Owner's reply to the Draft card; it joins the Intake brief. */
+  z.strictObject({ type: z.literal('draft_reply'), text: z.string().min(1) }),
+  /** `main` at approval becomes `config_sha`; feasibility is checked against its Recipe's Evidence kinds (CAP-4). */
+  z.strictObject({ type: z.literal('approved'), config_sha: z.string().min(1).nullable(), evidence_kinds: z.array(evidenceKindSchema) }),
   plain('discarded'),
   plain('undone'),
   plain('undo_expired'),
@@ -74,8 +78,8 @@ export const eventSchema = z.discriminatedUnion('type', [
   // Budget
   plain('budget_spent'),
   z.strictObject({ type: z.literal('budget_raised'), amount: z.int().positive() }),
-  // Generic Owner events
-  plain('cancel'),
+  // Generic Owner events. A `cancel` naming a Stage is Intake's `not_actionable`: that Stage succeeded.
+  z.strictObject({ type: z.literal('cancel'), stage_id: stageId.optional(), usage }),
   plain('pause'),
   plain('resume'),
   plain('amended'),
@@ -98,10 +102,15 @@ export const STAGE_EVENT_TYPES: readonly EventType[] = eventSchema.options
 export type StageEvent = Extract<Event, { stage_id: string }>;
 
 export function isStageEvent(event: Event): event is StageEvent {
-  return 'stage_id' in event;
+  return 'stage_id' in event && event.stage_id !== undefined;
 }
 
 /** Events that create a Task rather than move one (the `[*]` arrows of the AD-3 diagram). */
+/** The `stage_id` an event names, when it names one. */
+export function stageIdOf(event: Event): string | undefined {
+  return 'stage_id' in event ? event.stage_id : undefined;
+}
+
 export const CREATION_EVENT_TYPES = ['new_draft', 'bootstrap_created'] as const;
 export type CreationEventType = (typeof CREATION_EVENT_TYPES)[number];
 

@@ -92,6 +92,10 @@ export const taskSchema = z.object({
   waiting_reason: z.string().nullable(),
   undo_expires_at: isoTimestamp.nullable(),
   config_sha: z.string().nullable(),
+  /** The draft's short title, from Intake or the contract file; null until a contract exists. */
+  title: z.string().nullish(),
+  /** The Branch slug, `antipod/<task_no>-<slug>` (AD-5); set with the title. */
+  slug: z.string().nullish(),
   created_at: isoTimestamp,
   updated_at: isoTimestamp,
 });

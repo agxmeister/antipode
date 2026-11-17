@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { mkdir, readdir, rename, rm } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { RepoUnreachableError } from '../../core/domain/errors.ts';
 import { silentLog, type Log } from '../../core/ports/log.ts';
 import { STAGING_PREFIX, type Repo } from '../../core/ports/repo.ts';
@@ -11,6 +11,8 @@ export const FETCH_REFSPEC = '+refs/heads/*:refs/remotes/origin/*';
 export const MAIN_REF = 'refs/remotes/origin/main';
 /** The instance deploy key (AD-14), used through `GIT_SSH_COMMAND` only when it exists. */
 export const DEPLOY_KEY = 'id_antipod';
+/** The identity of Antipode's own commits (contract projections, AD-21). */
+export const COMMIT_IDENTITY = ['-c', 'user.name=Antipode', '-c', 'user.email=antipod@localhost', '-c', 'commit.gpgsign=false'] as const;
 /** Name of the read-only checkout of `main` under `data/worktrees/<project>/`. */
 export const MAIN_CHECKOUT = '_main';
 
@@ -151,6 +153,48 @@ export class GitRepo implements Repo {
     // A symlink (120000) is a blob holding its target path, not the file.
     if (type !== 'blob' || mode === '120000' || object === undefined) return undefined;
     return this.#git(['--git-dir', dir, 'cat-file', 'blob', object]);
+  }
+
+  async listTree(name: string, sha: string, dir: string): Promise<Array<{ path: string; blob_sha: string }>> {
+    const out = await this.#git(['--git-dir', this.cloneDir(name), 'ls-tree', '-r', '-z', sha, '--', dir]);
+    const entries: Array<{ path: string; blob_sha: string }> = [];
+    for (const record of out.split('\0')) {
+      // `<mode> <type> <object>\t<path>`; symlinks (120000) and submodules are not files.
+      const tab = record.indexOf('\t');
+      if (tab < 0) continue;
+      const [mode, type, object] = record.slice(0, tab).split(' ');
+      if (type !== 'blob' || mode === '120000' || object === undefined) continue;
+      entries.push({ path: record.slice(tab + 1), blob_sha: object });
+    }
+    return entries;
+  }
+
+  async commitInWorktree(worktree: string, files: Readonly<Record<string, string>>, removals: readonly string[], message: string): Promise<string | undefined> {
+    const inside = (path: string): string => {
+      const full = resolve(worktree, path);
+      const rel = relative(worktree, full);
+      if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`${path} is outside the worktree`);
+      return full;
+    };
+    for (const [path, text] of Object.entries(files)) {
+      const full = inside(path);
+      await mkdir(dirname(full), { recursive: true });
+      await writeFile(full, text);
+    }
+    const paths = Object.keys(files);
+    if (paths.length > 0) await this.#git(['-C', worktree, 'add', '--', ...paths]);
+    for (const path of removals) {
+      inside(path);
+      await this.#git(['-C', worktree, 'rm', '--quiet', '--ignore-unmatch', '--', path]);
+    }
+    const touched = [...paths, ...removals];
+    if (touched.length === 0) return undefined;
+    // Only these paths that actually changed: anything else already staged stays out of this commit,
+    // and a removal that matched nothing is no pathspec for `commit`.
+    const changed = (await this.#git(['-C', worktree, 'diff', '--cached', '--name-only', '-z', '--', ...touched])).split('\0').filter((path) => path !== '');
+    if (changed.length === 0) return undefined;
+    await this.#git(['-C', worktree, ...COMMIT_IDENTITY, 'commit', '--quiet', '--no-verify', '-m', message, '--', ...changed]);
+    return (await this.#git(['-C', worktree, 'rev-parse', 'HEAD'])).trim();
   }
 
   async promote(staging: string, name: string): Promise<void> {

@@ -56,13 +56,18 @@ function effect(taskId: string | null, kind: 'integrate' | 'run_release' = 'inte
 }
 
 describe('SqliteStore', () => {
-  it('migrations 0002 to 0006 create the STRICT Coordinator, Telegram and step tables', () => {
+  it('migrations 0002 to 0008 create the STRICT Coordinator, Telegram, step and contract tables', () => {
     const ts = setup();
     const tables = ts.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>;
     expect(tables.map((t) => t.name)).toEqual([
       'callbacks',
       'capability_leases',
+      'contract_sources',
+      'contracts',
+      'criteria',
+      'draft_questions',
       'effects',
+      'intake_messages',
       'outbox',
       'projects',
       'settings',
@@ -73,7 +78,7 @@ describe('SqliteStore', () => {
       'tasks',
       'telegram_messages',
     ]);
-    for (const table of ['tasks', 'task_dependencies', 'outbox', 'callbacks', 'telegram_messages', 'step_runs', 'capability_leases']) {
+    for (const table of ['tasks', 'task_dependencies', 'outbox', 'callbacks', 'telegram_messages', 'step_runs', 'capability_leases', 'contracts', 'criteria', 'draft_questions', 'contract_sources', 'intake_messages']) {
       const sql = ts.db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(table) as { sql: string };
       expect(sql.sql).toContain('STRICT');
     }
@@ -88,8 +93,11 @@ describe('SqliteStore', () => {
 
     const t = task(p.id);
     ts.store.insertTask(t);
-    expect(ts.store.getTask(t.id)).toEqual(t);
+    expect(ts.store.getTask(t.id)).toEqual({ ...t, title: null, slug: null });
     expect(ts.store.nextTaskNo(p.id)).toBe(1);
+    ts.store.updateTask(t.id, { title: 'Rest timer', slug: 'rest-timer', updated_at: t.updated_at });
+    expect(ts.store.getTask(t.id)).toMatchObject({ title: 'Rest timer', slug: 'rest-timer' });
+    expect(ts.store.taskByNo(p.id, 1)).toBeUndefined();
     ts.store.updateTask(t.id, { state: 'queued', task_no: 1, budget_used: 2, updated_at: '2026-11-08T12:00:01.000Z' });
     expect(ts.store.getTask(t.id)).toMatchObject({ state: 'queued', task_no: 1, budget_used: 2, updated_at: '2026-11-08T12:00:01.000Z' });
     expect(ts.store.nextTaskNo(p.id)).toBe(2);
@@ -438,5 +446,52 @@ describe('SqliteStore: step runs, leases and exclusive capabilities (AD-7, AD-11
     expect(ts.store.capabilityLeasedByOtherProject(alpha.id, ['android-emulator'])).toBe(false);
     expect(ts.store.capabilityLeasedByOtherProject(alpha.id, [])).toBe(false);
     expect(ts.store.capabilityLeasedByOtherProject(beta.id, ['unity-editor'])).toBe(false);
+  });
+
+  it('round-trips contract versions, criteria, questions, sources and Intake messages (AD-21)', () => {
+    const ts = setup();
+    const p = project('alpha');
+    ts.store.insertProject(p);
+    const t = task(p.id);
+    ts.store.insertTask(t);
+    ts.store.updateTask(t.id, { task_no: 4, state: 'queued', updated_at: NOW });
+    expect(ts.store.taskByNo(p.id, 4)?.id).toBe(t.id);
+
+    expect(ts.store.latestContract(t.id)).toBeUndefined();
+    ts.store.insertContract({ task_id: t.id, version: 1, goal: 'g1', depends_on: [], created_at: NOW });
+    ts.store.insertContract({ task_id: t.id, version: 2, goal: 'g2', depends_on: [3], created_at: NOW });
+    expect(ts.store.latestContract(t.id)).toEqual({ task_id: t.id, version: 2, goal: 'g2', depends_on: [3], created_at: NOW });
+    expect(() => ts.store.insertContract({ task_id: t.id, version: 2, goal: 'again', depends_on: [], created_at: NOW })).toThrow(/UNIQUE|PRIMARY/);
+
+    const criterion = { task_id: t.id, ac_no: 1, text: 'shows', required_evidence: 'screenshot' as const, infeasible_wanted: 'haptics', infeasible_proposal: 'log', status: 'active' as const };
+    ts.store.saveCriterion(criterion);
+    ts.store.saveCriterion({ ...criterion, ac_no: 2, infeasible_wanted: null, infeasible_proposal: null });
+    ts.store.saveCriterion({ ...criterion, status: 'dropped' });
+    expect(ts.store.criteriaOf(t.id).map((c) => [c.ac_no, c.status, c.infeasible_wanted])).toEqual([
+      [1, 'dropped', 'haptics'],
+      [2, 'active', null],
+    ]);
+
+    ts.store.insertQuestion({ task_id: t.id, q_no: 1, text: 'per exercise?', quick_answers: ['Yes', 'Not yet'], answer: null });
+    ts.store.insertQuestion({ task_id: t.id, q_no: 2, text: 'colour?', quick_answers: [], answer: null });
+    expect(ts.store.answerQuestion(t.id, 1, 'Not yet')).toBe(true);
+    expect(ts.store.answerQuestion(t.id, 1, 'Yes')).toBe(false);
+    ts.store.deleteOpenQuestions(t.id);
+    expect(ts.store.questionsOf(t.id)).toEqual([{ task_id: t.id, q_no: 1, text: 'per exercise?', quick_answers: ['Yes', 'Not yet'], answer: 'Not yet' }]);
+
+    const source = { project_id: p.id, path: '.antipod/inbox/a.yaml', blob_sha: 'b1', task_id: t.id, created_at: NOW };
+    ts.store.insertContractSource(source);
+    expect(() => ts.store.insertContractSource(source)).toThrow(/UNIQUE|PRIMARY/);
+    expect(ts.store.getContractSource(p.id, source.path, 'b1')).toEqual(source);
+    expect(ts.store.getContractSource(p.id, source.path, 'b2')).toBeUndefined();
+    expect(ts.store.contractSourcesAt(p.id, source.path)).toEqual([source]);
+    expect(ts.store.contractSourceOfTask(t.id)).toEqual(source);
+
+    ts.store.insertIntakeMessage({ id: ulid(), task_id: t.id, sender: 'owner', text: 'add a timer', message_id: 9, at: NOW });
+    ts.store.insertIntakeMessage({ id: ulid(), task_id: t.id, sender: 'bot', text: 'card', message_id: null, at: NOW });
+    expect(ts.store.intakeMessagesOf(t.id).map((m) => [m.sender, m.text, m.message_id])).toEqual([
+      ['owner', 'add a timer', 9],
+      ['bot', 'card', null],
+    ]);
   });
 });

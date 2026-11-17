@@ -427,6 +427,30 @@ describe('Scheduler (AD-11)', () => {
     expect(s.notifyRows(task.id, USAGE_WINDOW_RESUMED)).toHaveLength(1);
   });
 
+  it('Intake is held only by the usage window: a draft waits on usage_window with no notice, and launches once it reopens', async () => {
+    const s = setup({ concurrency: 1, open_reviews: 1 });
+    const p = s.project('alpha');
+    // Every Branch gate would hold a queued Task here: no bootstrap, concurrency and backpressure full.
+    s.task(p.id, { state: 'implementing' });
+    s.task(p.id, { state: 'in_review' });
+    s.window.value = reading(95);
+    await s.tick();
+    const draft = await s.coordinator.createTask({ project_id: p.id, kind: 'feature', intake: true });
+    await s.coordinator.idle();
+    await s.executor.drain();
+    expect(s.get(draft.id)).toMatchObject({ state: 'draft', waiting_reason: 'usage_window', task_no: null });
+    expect(s.launched).toEqual([]);
+    expect(s.notices).toEqual([]);
+
+    s.window.value = reading(40);
+    s.clock.advance(POLL_MS);
+    await s.tick();
+    await s.executor.drain();
+    expect(s.launched).toEqual([draft.id]);
+    expect(s.get(draft.id).waiting_reason).toBeNull();
+    expect(s.notices).toEqual([]);
+  });
+
   it('Launch hold: never holds a launch whose Stage is no longer starting', async () => {
     const s = setup();
     const p = s.project('alpha');

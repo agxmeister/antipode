@@ -1,4 +1,15 @@
 import type { Statement } from 'better-sqlite3';
+import { z } from 'zod';
+import {
+  CRITERION_STATUSES,
+  INTAKE_SENDERS,
+  type ContractRow,
+  type ContractSourceRow,
+  type CriterionRow,
+  type DraftQuestionRow,
+  type IntakeMessageRow,
+} from '../../core/domain/contract.ts';
+import { evidenceKindSchema } from '../../core/domain/recipe.ts';
 import { effectSchema, effectStatusSchema, type EffectRow, type EffectStatus } from '../../core/domain/effects.ts';
 import { stageEventRowSchema, type StageEventRow } from '../../core/domain/events.ts';
 import { stageSchema, type Stage, type StagePatch, type StageStatus } from '../../core/domain/stage.ts';
@@ -39,6 +50,8 @@ const TASK_COLUMNS = [
   'waiting_reason',
   'undo_expires_at',
   'config_sha',
+  'title',
+  'slug',
   'created_at',
   'updated_at',
 ] as const;
@@ -106,6 +119,55 @@ function toCallbackRow(row: unknown): CallbackRow {
   return callbackRowSchema.parse({ ...raw, args: JSON.parse(String(raw['args'])) });
 }
 
+const contractRowSchema = z.object({
+  task_id: z.string().min(1),
+  version: z.int().positive(),
+  goal: z.string(),
+  depends_on: z.array(z.int().positive()),
+  created_at: z.string(),
+});
+const criterionRowSchema = z.object({
+  task_id: z.string().min(1),
+  ac_no: z.int().positive(),
+  text: z.string(),
+  required_evidence: evidenceKindSchema,
+  infeasible_wanted: z.string().nullable(),
+  infeasible_proposal: z.string().nullable(),
+  status: z.enum(CRITERION_STATUSES),
+});
+const questionRowSchema = z.object({
+  task_id: z.string().min(1),
+  q_no: z.int().positive(),
+  text: z.string(),
+  quick_answers: z.array(z.string()),
+  answer: z.string().nullable(),
+});
+const sourceRowSchema = z.object({
+  project_id: z.string().min(1),
+  path: z.string().min(1),
+  blob_sha: z.string().min(1),
+  task_id: z.string().min(1),
+  created_at: z.string(),
+});
+const intakeMessageRowSchema = z.object({
+  id: z.string().min(1),
+  task_id: z.string().min(1),
+  sender: z.enum(INTAKE_SENDERS),
+  text: z.string(),
+  message_id: z.int().nullable(),
+  at: z.string(),
+});
+
+function toContractRow(row: unknown): ContractRow {
+  const raw = row as Record<string, unknown>;
+  return contractRowSchema.parse({ ...raw, depends_on: JSON.parse(String(raw['depends_on'] ?? '[]')) });
+}
+
+function toQuestionRow(row: unknown): DraftQuestionRow {
+  const raw = row as Record<string, unknown>;
+  return questionRowSchema.parse({ ...raw, quick_answers: JSON.parse(String(raw['quick_answers'] ?? '[]')) });
+}
+
 function toEffectRow(row: EffectDbRow): EffectRow {
   const effect = effectSchema.parse(JSON.parse(row.payload));
   return {
@@ -137,6 +199,21 @@ export class SqliteStore implements Store {
     bootstrapReleased: Statement;
     insertDependency: Statement;
     dependenciesOf: Statement;
+    taskByNo: Statement;
+    insertContract: Statement;
+    latestContract: Statement;
+    saveCriterion: Statement;
+    criteriaOf: Statement;
+    insertQuestion: Statement;
+    questionsOf: Statement;
+    answerQuestion: Statement;
+    deleteOpenQuestions: Statement;
+    insertContractSource: Statement;
+    getContractSource: Statement;
+    contractSourcesAt: Statement;
+    contractSourceOfTask: Statement;
+    insertIntakeMessage: Statement;
+    intakeMessagesOf: Statement;
     latestNotify: Statement;
     latestNotifyAnyKey: Statement;
     insertStage: Statement;
@@ -201,6 +278,26 @@ export class SqliteStore implements Store {
         `SELECT t.* FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on_task_id
          WHERE d.task_id = ? ORDER BY t.created_at, t.id`,
       ),
+      taskByNo: db.prepare('SELECT * FROM tasks WHERE project_id = ? AND task_no = ?'),
+      insertContract: db.prepare(insertSql('contracts', ['task_id', 'version', 'goal', 'depends_on', 'created_at'])),
+      latestContract: db.prepare('SELECT * FROM contracts WHERE task_id = ? ORDER BY version DESC LIMIT 1'),
+      saveCriterion: db.prepare(
+        `INSERT INTO criteria (task_id, ac_no, text, required_evidence, infeasible_wanted, infeasible_proposal, status)
+         VALUES (@task_id, @ac_no, @text, @required_evidence, @infeasible_wanted, @infeasible_proposal, @status)
+         ON CONFLICT (task_id, ac_no) DO UPDATE SET text = @text, required_evidence = @required_evidence,
+           infeasible_wanted = @infeasible_wanted, infeasible_proposal = @infeasible_proposal, status = @status`,
+      ),
+      criteriaOf: db.prepare('SELECT * FROM criteria WHERE task_id = ? ORDER BY ac_no'),
+      insertQuestion: db.prepare(insertSql('draft_questions', ['task_id', 'q_no', 'text', 'quick_answers', 'answer'])),
+      questionsOf: db.prepare('SELECT * FROM draft_questions WHERE task_id = ? ORDER BY q_no'),
+      answerQuestion: db.prepare('UPDATE draft_questions SET answer = ? WHERE task_id = ? AND q_no = ? AND answer IS NULL'),
+      deleteOpenQuestions: db.prepare('DELETE FROM draft_questions WHERE task_id = ? AND answer IS NULL'),
+      insertContractSource: db.prepare(insertSql('contract_sources', ['project_id', 'path', 'blob_sha', 'task_id', 'created_at'])),
+      getContractSource: db.prepare('SELECT * FROM contract_sources WHERE project_id = ? AND path = ? AND blob_sha = ?'),
+      contractSourcesAt: db.prepare('SELECT * FROM contract_sources WHERE project_id = ? AND path = ? ORDER BY created_at, blob_sha'),
+      contractSourceOfTask: db.prepare('SELECT * FROM contract_sources WHERE task_id = ? ORDER BY created_at LIMIT 1'),
+      insertIntakeMessage: db.prepare(insertSql('intake_messages', ['id', 'task_id', 'sender', 'text', 'message_id', 'at'])),
+      intakeMessagesOf: db.prepare('SELECT * FROM intake_messages WHERE task_id = ? ORDER BY at, id'),
       latestNotify: db.prepare(
         `SELECT * FROM effects WHERE task_id = ? AND kind = 'notify'
          AND json_extract(payload, '$.notice_kind') = ? AND json_extract(payload, '$.payload.key') = ?
@@ -317,7 +414,7 @@ export class SqliteStore implements Store {
   }
 
   insertTask(task: Task): void {
-    this.#stmt.insertTask.run(task);
+    this.#stmt.insertTask.run({ ...task, title: task.title ?? null, slug: task.slug ?? null });
   }
 
   getTask(id: string): Task | undefined {
@@ -365,6 +462,72 @@ export class SqliteStore implements Store {
 
   dependenciesOf(taskId: string): Task[] {
     return this.#stmt.dependenciesOf.all(taskId).map((row) => taskSchema.parse(row));
+  }
+
+  taskByNo(projectId: string, taskNo: number): Task | undefined {
+    const row = this.#stmt.taskByNo.get(projectId, taskNo);
+    return row === undefined ? undefined : taskSchema.parse(row);
+  }
+
+  insertContract(row: ContractRow): void {
+    const valid = contractRowSchema.parse(row);
+    this.#stmt.insertContract.run({ ...valid, depends_on: JSON.stringify(valid.depends_on) });
+  }
+
+  latestContract(taskId: string): ContractRow | undefined {
+    const row = this.#stmt.latestContract.get(taskId);
+    return row === undefined ? undefined : toContractRow(row);
+  }
+
+  saveCriterion(row: CriterionRow): void {
+    this.#stmt.saveCriterion.run(criterionRowSchema.parse(row));
+  }
+
+  criteriaOf(taskId: string): CriterionRow[] {
+    return this.#stmt.criteriaOf.all(taskId).map((row) => criterionRowSchema.parse(row));
+  }
+
+  insertQuestion(row: DraftQuestionRow): void {
+    const valid = questionRowSchema.parse(row);
+    this.#stmt.insertQuestion.run({ ...valid, quick_answers: JSON.stringify(valid.quick_answers) });
+  }
+
+  questionsOf(taskId: string): DraftQuestionRow[] {
+    return this.#stmt.questionsOf.all(taskId).map(toQuestionRow);
+  }
+
+  answerQuestion(taskId: string, qNo: number, answer: string): boolean {
+    return this.#stmt.answerQuestion.run(answer, taskId, qNo).changes === 1;
+  }
+
+  deleteOpenQuestions(taskId: string): void {
+    this.#stmt.deleteOpenQuestions.run(taskId);
+  }
+
+  insertContractSource(row: ContractSourceRow): void {
+    this.#stmt.insertContractSource.run(sourceRowSchema.parse(row));
+  }
+
+  getContractSource(projectId: string, path: string, blobSha: string): ContractSourceRow | undefined {
+    const row = this.#stmt.getContractSource.get(projectId, path, blobSha);
+    return row === undefined ? undefined : sourceRowSchema.parse(row);
+  }
+
+  contractSourcesAt(projectId: string, path: string): ContractSourceRow[] {
+    return this.#stmt.contractSourcesAt.all(projectId, path).map((row) => sourceRowSchema.parse(row));
+  }
+
+  contractSourceOfTask(taskId: string): ContractSourceRow | undefined {
+    const row = this.#stmt.contractSourceOfTask.get(taskId);
+    return row === undefined ? undefined : sourceRowSchema.parse(row);
+  }
+
+  insertIntakeMessage(row: IntakeMessageRow): void {
+    this.#stmt.insertIntakeMessage.run(intakeMessageRowSchema.parse(row));
+  }
+
+  intakeMessagesOf(taskId: string): IntakeMessageRow[] {
+    return this.#stmt.intakeMessagesOf.all(taskId).map((row) => intakeMessageRowSchema.parse(row));
   }
 
   insertStage(stage: Stage): void {

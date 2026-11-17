@@ -16,6 +16,20 @@ export interface TransitionContext {
   limits: { undo_accept_ms: number; undo_discard_ms: number };
   /** The next per-Project Task number, read when `approved` assigns it (AD-16). */
   nextTaskNo(): number;
+  /**
+   * Why `approved` must be refused (open question, infeasible criterion, bad dependency), or undefined
+   * when it may be applied (CAP-8, CAP-9). Absent means nothing refuses.
+   */
+  approvalRefusal?(event: EventOf<'approved'>): string | undefined;
+}
+
+/** The Draft card, rendered from the rows; sent once, then edited in place. Payload `{refusal?, closed?}`. */
+export const DRAFT_CARD = 'draft_card';
+/** Intake gave up on a draft: `👀` becomes `❌` with `Couldn't process that — send it again.` (AD-10). */
+export const INTAKE_FAILED = 'intake_failed';
+
+function draftCard(taskId: string, payload?: Record<string, unknown>): Effect {
+  return { kind: 'notify', notice_kind: DRAFT_CARD, task_id: taskId, ...(payload === undefined ? {} : { payload }) };
 }
 
 /** Retries for a Stage role with no `roles.<role>` entry, such as the `test` step. */
@@ -53,6 +67,7 @@ export type Outcome = Applied | Ignored;
 
 /** States that run a Stage, and the Role of that Stage. `test` is the Coordinator-run Recipe step. */
 export const STAGE_ROLES: Readonly<Partial<Record<TaskState, string>>> = {
+  draft: 'intake',
   implementing: 'implementer',
   testing: 'test',
   validating: 'validator',
@@ -117,6 +132,8 @@ function enter(next: TaskState, task: Task, stage: Stage | undefined, ctx: Trans
     }
     const start: StageStart = { id: ctx.newId(), role, attempt: opts.attempt ?? 1 };
     patch.current_stage_id = start.id;
+    // The contract projection lands on the Branch before any Stage edits it (AD-21); a retry is no new entry.
+    if (next === 'implementing' && task.state !== 'implementing' && task.kind === 'feature') effects.push({ kind: 'commit_contract', task_id: task.id });
     effects.push(
       next === 'testing'
         ? { kind: 'run_test_step', stage_id: start.id, task_id: task.id, attempt: start.attempt }
@@ -135,11 +152,21 @@ function enter(next: TaskState, task: Task, stage: Stage | undefined, ctx: Trans
         if (task.review_round > 0) effects.push({ kind: 'retire_card', task_id: task.id, round: task.review_round });
       }
       break;
+    case 'awaiting_approval':
+      effects.push(draftCard(task.id));
+      break;
+    case 'queued':
+      if (opts.cause === 'approved') effects.push({ kind: 'prepare_branch', task_id: task.id }, draftCard(task.id));
+      break;
     case 'accept_pending':
       patch.undo_expires_at = new Date(ctx.now.getTime() + ctx.limits.undo_accept_ms).toISOString();
       break;
     case 'discard_pending':
       patch.undo_expires_at = new Date(ctx.now.getTime() + ctx.limits.undo_discard_ms).toISOString();
+      effects.push(draftCard(task.id));
+      break;
+    case 'cancelled':
+      if (task.state === 'discard_pending') effects.push(draftCard(task.id, { closed: 'discarded' }));
       break;
     case 'paused':
       patch.resume_state = task.state;
@@ -183,11 +210,18 @@ type RuleTable = { [S in TaskState]?: { [E in EventType]?: Rule<E> } };
 
 /** The AD-3 diagram, one entry per arrow. Generic events are handled in `transition` before this table. */
 const TABLE: RuleTable = {
-  draft: { draft_ready: go('awaiting_approval') },
+  draft: {
+    // From the Intake Stage that wrote the draft (it succeeded), or from a complete contract file with no Stage.
+    draft_ready: (task, stage, event, ctx) =>
+      enter('awaiting_approval', task, stage, ctx, { cause: event.type, ...(event.stage_id === undefined ? {} : { stageUpdate: SUCCEEDED }) }),
+  },
   awaiting_approval: {
     draft_reply: go('draft'),
     approved: (task, stage, event, ctx) =>
-      enter('queued', task, stage, ctx, { cause: event.type, patch: { task_no: task.task_no ?? ctx.nextTaskNo() } }),
+      enter('queued', task, stage, ctx, {
+        cause: event.type,
+        patch: { task_no: task.task_no ?? ctx.nextTaskNo(), config_sha: event.config_sha ?? task.config_sha },
+      }),
     discarded: go('discard_pending'),
   },
   discard_pending: {
@@ -258,7 +292,9 @@ function generic(task: Task, stage: Stage | undefined, event: Event, ctx: Transi
   const active = ACTIVE_STATES.includes(task.state);
   switch (event.type) {
     case 'cancel':
-      return TERMINAL_STATES.includes(task.state) ? { ignored: 'invalid' } : enter('cancelled', task, stage, ctx, { cause: event.type });
+      if (TERMINAL_STATES.includes(task.state)) return { ignored: 'invalid' };
+      // Naming the current Stage: that Stage concluded the Task is not actionable (AD-9), so it succeeded.
+      return enter('cancelled', task, stage, ctx, { cause: event.type, ...(event.stage_id === undefined ? {} : { stageUpdate: SUCCEEDED }) });
     case 'pause':
       return active && task.state !== 'paused' ? enter('paused', task, stage, ctx, { cause: event.type }) : { ignored: 'invalid' };
     case 'resume':
@@ -277,6 +313,12 @@ function generic(task: Task, stage: Stage | undefined, event: Event, ctx: Transi
       if (!isStageState(task.state) || stage === undefined || stage.id !== task.current_stage_id) return { ignored: 'invalid' };
       if (!LIVE_STAGE_STATUSES.includes(stage.status) && stage.status !== 'failed') return { ignored: 'invalid' };
       const reason = event.reason ?? `${stage.role} Stage exhausted its retries`;
+      if (task.state === 'draft') {
+        // Intake gave up: the draft is cancelled and the Owner's message gets `❌` and a reply (AD-10).
+        const cancelled = enter('cancelled', task, stage, ctx, { cause: event.type });
+        cancelled.effects.push({ kind: 'notify', notice_kind: INTAKE_FAILED, task_id: task.id, payload: { reason } }, draftCard(task.id, { closed: 'cancelled' }));
+        return cancelled;
+      }
       return enter('stuck', task, stage, ctx, { cause: event.type, patch: { stuck_reason: reason } });
     }
     case 'stage_started':
@@ -320,6 +362,10 @@ export function transition(task: Task, stage: Stage | undefined, event: Event, c
     return { ignored: 'invalid' };
   }
   if (event.type === 'undo_expired' && (task.undo_expires_at === null || undoStillOpen(task, ctx))) {
+    return { ignored: 'invalid' };
+  }
+  // Refused while a question is open or a criterion infeasible, even from a stale button (CAP-8).
+  if (event.type === 'approved' && task.state === 'awaiting_approval' && ctx.approvalRefusal?.(event) !== undefined) {
     return { ignored: 'invalid' };
   }
   const rule = (TABLE[task.state] as { [E in EventType]?: Rule<E> } | undefined)?.[event.type] as Rule | undefined;

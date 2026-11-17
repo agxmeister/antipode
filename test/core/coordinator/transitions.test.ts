@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   COUNTING_CAUSES,
   DEFAULT_STAGE_RETRIES,
+  DRAFT_CARD,
+  INTAKE_FAILED,
   STAGE_ROLES,
   transition,
   type Applied,
@@ -65,13 +67,20 @@ function stage(state: TaskState, overrides: Partial<Stage> = {}): Stage {
   };
 }
 
-/** A well-formed sample of every event type, naming the current Stage. */
-function sample(type: EventType, stageId = CURRENT): Event {
+/** Events whose `stage_id` is optional: named only when the test names a Stage. */
+const OPTIONAL_STAGE: readonly EventType[] = ['draft_ready', 'cancel'];
+
+/** A well-formed sample of every event type; a Stage event names the current Stage unless told otherwise. */
+function sample(type: EventType, stageId?: string): Event {
   switch (type) {
+    case 'draft_reply':
+      return { type, text: 'make it bigger' };
+    case 'approved':
+      return { type, config_sha: 'abc123', evidence_kinds: ['screenshot'] };
     case 'stage_failed':
-      return { type, stage_id: stageId, reason: 'timeout' };
+      return { type, stage_id: stageId ?? CURRENT, reason: 'timeout' };
     case 'reason_written':
-      return { type, stage_id: stageId, reason: 'cannot satisfy AC2' };
+      return { type, stage_id: stageId ?? CURRENT, reason: 'cannot satisfy AC2' };
     case 'deps_unsatisfiable':
       return { type, reason: 'dependency cancelled' };
     case 'budget_raised':
@@ -79,7 +88,8 @@ function sample(type: EventType, stageId = CURRENT): Event {
     case 'stage_retries_exhausted':
       return { type };
     default:
-      return STAGE_EVENT_TYPES.includes(type) ? ({ type, stage_id: stageId } as Event) : ({ type } as Event);
+      if (!STAGE_EVENT_TYPES.includes(type) || (OPTIONAL_STAGE.includes(type) && stageId === undefined)) return { type } as Event;
+      return { type, stage_id: stageId ?? CURRENT } as Event;
   }
 }
 
@@ -94,7 +104,7 @@ const STAGE_STATES = TASK_STATES.filter((s) => STAGE_ROLES[s] !== undefined);
 
 /** Every applied `(state, event)` pair; everything else must be `ignored(invalid)`. */
 const EXPECTED: Record<TaskState, Partial<Record<EventType, TaskState>>> = {
-  draft: { draft_ready: 'awaiting_approval' },
+  draft: { draft_ready: 'awaiting_approval', stage_retries_exhausted: 'cancelled' },
   awaiting_approval: { draft_reply: 'draft', approved: 'queued', discarded: 'discard_pending' },
   discard_pending: { undone: 'awaiting_approval', undo_expired: 'cancelled' },
   queued: { deps_unmerged: 'waiting_on_dependencies', scheduler_start: 'implementing' },
@@ -125,7 +135,8 @@ for (const state of TASK_STATES) {
   if (STAGE_ROLES[state] !== undefined) {
     row.stage_started = state;
     row.stage_failed = state;
-    row.stage_retries_exhausted = 'stuck';
+    // Intake giving up cancels the draft (AD-10); every other Stage state goes to stuck (AD-3).
+    row.stage_retries_exhausted ??= 'stuck';
   }
 }
 
@@ -189,8 +200,21 @@ describe('entering a Stage state', () => {
     expect(outcome.patch.budget_used).toBe(1);
     expect(outcome.patch.current_stage_id).toBe('new-1');
     expect(outcome.startStage).toEqual({ id: 'new-1', role: 'implementer', attempt: 1 });
-    expect(outcome.effects).toEqual([{ kind: 'start_stage', stage_id: 'new-1', task_id: 'task-1', role: 'implementer', attempt: 1 }]);
+    // The contract projection is the first effect on entering implementing, ahead of the Stage (AD-21).
+    expect(outcome.effects).toEqual([
+      { kind: 'commit_contract', task_id: 'task-1' },
+      { kind: 'start_stage', stage_id: 'new-1', task_id: 'task-1', role: 'implementer', attempt: 1 },
+    ]);
     expect(outcome.derived).toEqual([]);
+  });
+
+  it('a bootstrap Task has no contract to commit; a retry of implementing commits nothing again', () => {
+    const bootstrap = applied(transition(task('queued', { kind: 'bootstrap', current_stage_id: null }), undefined, sample('scheduler_start'), ctx()));
+    expect(bootstrap.effects.map((e) => e.kind)).toEqual(['start_stage']);
+    const retry = applied(transition(task('implementing'), stage('implementing'), sample('stage_failed'), ctx()));
+    expect(retry.effects.map((e) => e.kind)).toEqual(['start_stage']);
+    const correction = applied(transition(task('in_review', { current_stage_id: null }), undefined, sample('correction'), ctx()));
+    expect(correction.effects.map((e) => e.kind)).toEqual(['commit_contract', 'start_stage']);
   });
 
   it('testing runs the test step instead of a claude Stage', () => {
@@ -202,7 +226,7 @@ describe('entering a Stage state', () => {
   });
 
   it.each(STAGE_STATES)('%s is entered with a Stage of its Role', (state) => {
-    const from = Object.entries(EXPECTED).find(([, row]) => Object.values(row).includes(state) && row.cancel !== undefined);
+    const from = Object.entries(EXPECTED).find(([source, row]) => source !== state && Object.values(row).includes(state) && row.cancel !== undefined);
     expect(from).toBeDefined();
     const [fromState, row] = from as [TaskState, Partial<Record<EventType, TaskState>>];
     const type = (Object.keys(row) as EventType[]).find((t) => row[t] === state) as EventType;
@@ -443,5 +467,76 @@ describe('other columns', () => {
     const outcome = applied(transition(task('implementing'), stage('implementing', { status: 'failed' }), sample('cancel'), ctx()));
     expect(outcome.stageUpdate).toBeUndefined();
     expect(outcome.effects).toEqual([]);
+  });
+});
+
+describe('drafts (AD-3, AD-9, CAP-8, CAP-9)', () => {
+  const draft = (overrides: Partial<Task> = {}) => task('draft', { task_no: null, ...overrides });
+
+  it('draft_ready from the Intake Stage ends that Stage succeeded and queues the Draft card', () => {
+    const outcome = applied(transition(draft(), stage('draft'), sample('draft_ready', CURRENT), ctx()));
+    expect(outcome.next).toBe('awaiting_approval');
+    expect(outcome.stageUpdate).toEqual({ status: 'succeeded', reason: null });
+    expect(outcome.effects).toEqual([{ kind: 'notify', notice_kind: DRAFT_CARD, task_id: 'task-1' }]);
+    expect(outcome.patch.current_stage_id).toBeNull();
+  });
+
+  it('draft_ready with no Stage (a complete contract file) starts nothing; one naming an old Stage is stale', () => {
+    const outcome = applied(transition(draft({ current_stage_id: null }), undefined, sample('draft_ready'), ctx()));
+    expect(outcome.next).toBe('awaiting_approval');
+    expect(outcome.stageUpdate).toBeUndefined();
+    expect(transition(draft(), stage('draft'), sample('draft_ready', 'stage-old'), ctx())).toEqual({ ignored: 'stale' });
+  });
+
+  it('draft_reply reruns Intake: a new intake Stage, attempt 1, no budget unit', () => {
+    const outcome = applied(transition(task('awaiting_approval', { current_stage_id: null, budget_used: 0 }), undefined, sample('draft_reply'), ctx()));
+    expect(outcome.next).toBe('draft');
+    expect(outcome.startStage).toEqual({ id: 'new-1', role: 'intake', attempt: 1 });
+    expect(outcome.effects).toEqual([{ kind: 'start_stage', stage_id: 'new-1', task_id: 'task-1', role: 'intake', attempt: 1 }]);
+    expect(outcome.patch.budget_used).toBeUndefined();
+  });
+
+  it('not_actionable is a cancel naming the Intake Stage: cancelled, the Stage succeeded, nothing sent', () => {
+    const outcome = applied(transition(draft(), stage('draft'), sample('cancel', CURRENT), ctx()));
+    expect(outcome.next).toBe('cancelled');
+    expect(outcome.stageUpdate).toEqual({ status: 'succeeded', reason: null });
+    expect(outcome.effects).toEqual([]);
+  });
+
+  it('stage_retries_exhausted in draft cancels the draft with the intake-failed notice, never stuck', () => {
+    const outcome = applied(transition(draft(), stage('draft', { status: 'failed', attempt: 3 }), { type: 'stage_retries_exhausted', reason: 'intake failed 3 times' }, ctx()));
+    expect(outcome.next).toBe('cancelled');
+    expect(outcome.patch.stuck_reason).toBeNull();
+    expect(outcome.effects).toEqual([
+      { kind: 'notify', notice_kind: INTAKE_FAILED, task_id: 'task-1', payload: { reason: 'intake failed 3 times' } },
+      { kind: 'notify', notice_kind: DRAFT_CARD, task_id: 'task-1', payload: { closed: 'cancelled' } },
+    ]);
+  });
+
+  it('approved numbers the Task, pins config_sha, and queues prepare_branch and the card edit', () => {
+    const outcome = applied(transition(task('awaiting_approval', { current_stage_id: null }), undefined, sample('approved'), ctx()));
+    expect(outcome.next).toBe('queued');
+    expect(outcome.patch).toMatchObject({ task_no: 7, config_sha: 'abc123' });
+    expect(outcome.effects).toEqual([
+      { kind: 'prepare_branch', task_id: 'task-1' },
+      { kind: 'notify', notice_kind: DRAFT_CARD, task_id: 'task-1' },
+    ]);
+  });
+
+  it('approved is refused while the context names a reason, even from a stale button', () => {
+    const refusing = ctx({ approvalRefusal: () => 'answer Q1 first' });
+    expect(transition(task('awaiting_approval', { current_stage_id: null }), undefined, sample('approved'), refusing)).toEqual({ ignored: 'invalid' });
+  });
+
+  it('discarded, undone and undo_expired each re-render the card; expiry closes it as Discarded', () => {
+    const discarded = applied(transition(task('awaiting_approval', { current_stage_id: null }), undefined, sample('discarded'), ctx()));
+    expect(discarded.effects).toEqual([{ kind: 'notify', notice_kind: DRAFT_CARD, task_id: 'task-1' }]);
+    const undone = applied(transition(task('discard_pending', { current_stage_id: null }), undefined, sample('undone'), ctx()));
+    expect(undone.next).toBe('awaiting_approval');
+    expect(undone.effects).toEqual([{ kind: 'notify', notice_kind: DRAFT_CARD, task_id: 'task-1' }]);
+    const closedWindow = task('discard_pending', { current_stage_id: null, undo_expires_at: new Date(NOW.getTime() - 1).toISOString() });
+    const expired = applied(transition(closedWindow, undefined, sample('undo_expired'), ctx()));
+    expect(expired.next).toBe('cancelled');
+    expect(expired.effects).toEqual([{ kind: 'notify', notice_kind: DRAFT_CARD, task_id: 'task-1', payload: { closed: 'discarded' } }]);
   });
 });

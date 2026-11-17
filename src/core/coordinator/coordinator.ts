@@ -1,12 +1,17 @@
 import type { Effect, EffectRow } from '../domain/effects.ts';
 import { AntipodError } from '../domain/errors.ts';
-import type { CreationEventType, Event, IgnoreReason } from '../domain/events.ts';
+import { stageIdOf, type CreationEventType, type Event, type IgnoreReason } from '../domain/events.ts';
+import type { EvidenceKind } from '../domain/recipe.ts';
 import { ulid } from '../domain/ids.ts';
 import type { Clock } from '../ports/clock.ts';
 import { silentLog, type Log } from '../ports/log.ts';
 import type { Store } from '../ports/store.ts';
 import { projectSchema, taskSchema, waitingReasonSchema, type Project, type Task, type TaskKind, type TaskState, type WaitingReason } from '../domain/task.ts';
-import { DEFAULT_STAGE_RETRIES, transition, type TransitionContext } from './transitions.ts';
+import { approvalRefusal, bumpContract, resolveDependencies } from './drafts.ts';
+import { DEFAULT_STAGE_RETRIES, DRAFT_CARD, transition, type TransitionContext } from './transitions.ts';
+
+/** The Intake Role, whose Stage a draft runs in state `draft` (AD-9). */
+export const INTAKE_ROLE = 'intake';
 
 /** The configurable part of the FSM, read on every event so a SIGHUP reload applies at once. */
 export interface CoordinatorPolicy {
@@ -33,7 +38,20 @@ export interface CreateTaskInput {
   kind: TaskKind;
   budget_limit?: number;
   config_sha?: string | null;
+  /** What a `new_draft` came from, recorded in its creation event: `{text}` or `{path, blob_sha}`. */
+  source?: Record<string, unknown>;
+  /** Starts the Intake Stage of a `draft` Task in the same transaction (AD-9). */
+  intake?: boolean;
+  /** Applies `draft_ready` at once: a complete contract file needs no Stage (AD-5). */
+  ready?: boolean;
+  /** Rows written with the Task, inside its creation transaction (contract, source, Owner message). */
+  rows?: (task: Task) => void;
 }
+
+/** Writes rows that belong to an event, inside its transaction, only when the event is applied. */
+export type EventRows = (task: Task) => void;
+
+export type ApprovalResult = { ok: true; task_no: number } | { ok: false; reason: string };
 
 export class TaskNotFoundError extends AntipodError {
   constructor(taskId: string) {
@@ -114,14 +132,17 @@ export class Coordinator {
 
   /** `new_draft` (kind `feature`, state `draft`) or `bootstrap_created` (kind `bootstrap`, state `queued`). */
   createTask(input: CreateTaskInput): Promise<Task> {
-    return this.#enqueue(() =>
-      this.#store.transaction(() => {
+    return this.#enqueue(() => {
+      const created = this.#store.transaction(() => {
         if (this.#store.getProject(input.project_id) === undefined) {
           throw new ProjectNotFoundError(input.project_id);
         }
         const now = this.#now();
         const bootstrap = input.kind === 'bootstrap';
         const creation: CreationEventType = bootstrap ? 'bootstrap_created' : 'new_draft';
+        if (bootstrap && (input.intake === true || input.ready === true)) {
+          throw new Error('a bootstrap Task has no draft');
+        }
         const task: Task = taskSchema.parse({
           id: this.#newId(),
           project_id: input.project_id,
@@ -141,27 +162,153 @@ export class Coordinator {
           updated_at: now,
         });
         this.#store.insertTask(task);
+        let stageId: string | null = null;
+        if (input.intake === true && input.ready !== true) {
+          // The `[*] --> draft` arrow starts Intake like any entry to a Stage state (AD-3, AD-9).
+          stageId = this.#newId();
+          this.#store.insertStage({ id: stageId, task_id: task.id, role: INTAKE_ROLE, attempt: 1, status: 'starting', reason: null, created_at: now, started_at: null, ended_at: null });
+          this.#store.updateTask(task.id, { current_stage_id: stageId, updated_at: now });
+        }
         this.#store.appendStageEvent({
           id: this.#newId(),
           task_id: task.id,
-          stage_id: null,
+          stage_id: stageId,
           event_type: creation,
-          payload: JSON.stringify({ type: creation }),
+          payload: JSON.stringify(input.source === undefined ? { type: creation } : { type: creation, source: input.source }),
           status: 'applied',
           ignore_reason: null,
           from_state: null,
           to_state: task.state,
           created_at: now,
         });
-        return task;
-      }),
-    );
+        let effects = 0;
+        if (stageId !== null) {
+          this.#insertEffect(task.id, { kind: 'start_stage', stage_id: stageId, task_id: task.id, role: INTAKE_ROLE, attempt: 1 });
+          effects++;
+        }
+        input.rows?.(task);
+        if (input.ready === true) {
+          const ready = this.#applyNow(task.id, { type: 'draft_ready' });
+          if (ready.applied) effects += ready.effects;
+        }
+        return { task: this.#store.getTask(task.id) ?? task, effects };
+      });
+      if (created.effects > 0) {
+        this.#onEffectsCommitted();
+      }
+      return created.task;
+    });
   }
 
-  /** Applies one event to one Task: state, `stage_events` and `effects` in one transaction, then notifies the executor. */
-  applyEvent(taskId: string, event: Event): Promise<ApplyResult> {
+  /**
+   * `approved` (CAP-9): refused with the reason while a question is open, a criterion is infeasible
+   * against `evidence_kinds`, or a dependency is missing, a bootstrap Task or a cycle; the card then
+   * shows the reason. Applied, it records the dependencies in the same transaction.
+   */
+  approveDraft(taskId: string, approval: { config_sha: string | null; evidence_kinds: readonly EvidenceKind[] }): Promise<ApprovalResult> {
     return this.#enqueue(() => {
-      const result = this.#store.transaction(() => this.#applyNow(taskId, event));
+      const result = this.#store.transaction((): ApprovalResult & { effects: number } => {
+        const task = this.#requireTask(taskId);
+        if (task.state !== 'awaiting_approval') {
+          return { ok: false, reason: 'this draft is no longer open', effects: 0 };
+        }
+        const refusal = approvalRefusal(this.#store, task, approval.evidence_kinds);
+        if (refusal !== undefined) {
+          this.#insertEffect(task.id, { kind: 'notify', notice_kind: DRAFT_CARD, task_id: task.id, payload: { refusal } });
+          return { ok: false, reason: refusal, effects: 1 };
+        }
+        const deps = resolveDependencies(this.#store, task);
+        if ('refusal' in deps) {
+          this.#insertEffect(task.id, { kind: 'notify', notice_kind: DRAFT_CARD, task_id: task.id, payload: { refusal: deps.refusal } });
+          return { ok: false, reason: deps.refusal, effects: 1 };
+        }
+        const applied = this.#applyNow(task.id, { type: 'approved', config_sha: approval.config_sha, evidence_kinds: [...approval.evidence_kinds] });
+        if (!applied.applied) {
+          return { ok: false, reason: 'this draft is no longer open', effects: 0 };
+        }
+        for (const id of deps.ids) this.#store.insertDependency(task.id, id);
+        const numbered = this.#requireTask(task.id);
+        return { ok: true, task_no: numbered.task_no as number, effects: applied.effects };
+      });
+      if (result.effects > 0) this.#onEffectsCommitted();
+      const { effects: _effects, ...outcome } = result;
+      return outcome;
+    });
+  }
+
+  /** A quick-answer tap (AD-9): records the answer on the draft row and re-renders the card; no Stage. */
+  answerQuestion(taskId: string, qNo: number, answer: string): Promise<boolean> {
+    return this.#draftCommand(taskId, () => this.#store.answerQuestion(taskId, qNo, answer));
+  }
+
+  /** `Use proposal`: the infeasible criterion takes Intake's substitute (CAP-8); the contract version is bumped. */
+  useProposal(taskId: string, acNo: number): Promise<boolean> {
+    return this.#draftCommand(taskId, (now) => {
+      const criterion = this.#store.criteriaOf(taskId).find((row) => row.ac_no === acNo);
+      if (criterion === undefined || criterion.status !== 'active' || criterion.infeasible_proposal === null) return false;
+      this.#store.saveCriterion({ ...criterion, infeasible_wanted: null, infeasible_proposal: null });
+      bumpContract(this.#store, taskId, now);
+      return true;
+    });
+  }
+
+  /** `Drop ACn`: the criterion keeps its number with `status = dropped` (AD-16); the contract version is bumped. */
+  dropCriterion(taskId: string, acNo: number): Promise<boolean> {
+    return this.#draftCommand(taskId, (now) => {
+      const criterion = this.#store.criteriaOf(taskId).find((row) => row.ac_no === acNo);
+      if (criterion === undefined || criterion.status !== 'active') return false;
+      this.#store.saveCriterion({ ...criterion, status: 'dropped' });
+      bumpContract(this.#store, taskId, now);
+      return true;
+    });
+  }
+
+  /** Queues one `scan_inbox` for the Project unless one is already pending (AD-5). Resolves whether it queued. */
+  requestInboxScan(projectId: string): Promise<boolean> {
+    return this.#enqueue(() => {
+      const queued = this.#store.transaction(() => {
+        if (this.#store.getProject(projectId) === undefined) throw new ProjectNotFoundError(projectId);
+        const pending = this.#store.pendingEffects().some((row) => row.effect.kind === 'scan_inbox' && row.effect.project_id === projectId);
+        if (pending) return false;
+        this.#insertEffect(null, { kind: 'scan_inbox', project_id: projectId });
+        return true;
+      });
+      if (queued) this.#onEffectsCommitted();
+      return queued;
+    });
+  }
+
+  /** A button command on a draft in `awaiting_approval`: `change` edits rows; when it did, the card is re-rendered. */
+  #draftCommand(taskId: string, change: (now: string) => boolean): Promise<boolean> {
+    return this.#enqueue(() => {
+      const changed = this.#store.transaction(() => {
+        const task = this.#requireTask(taskId);
+        if (task.state !== 'awaiting_approval') return false;
+        const now = this.#now();
+        if (!change(now)) return false;
+        this.#store.updateTask(taskId, { updated_at: now });
+        this.#insertEffect(taskId, { kind: 'notify', notice_kind: DRAFT_CARD, task_id: taskId });
+        return true;
+      });
+      if (changed) this.#onEffectsCommitted();
+      return changed;
+    });
+  }
+
+  #requireTask(taskId: string): Task {
+    const task = this.#store.getTask(taskId);
+    if (task === undefined) throw new TaskNotFoundError(taskId);
+    return task;
+  }
+
+  /**
+   * Applies one event to one Task: state, `stage_events` and `effects` in one transaction, then notifies
+   * the executor. `rows` writes the rows that belong to the event (a draft's contract) in the same
+   * transaction, only when the event is applied.
+   */
+  applyEvent(taskId: string, event: Event, rows?: EventRows): Promise<ApplyResult> {
+    return this.#enqueue(() => {
+      const result = this.#store.transaction(() => this.#applyNow(taskId, event, rows));
       if (result.applied && result.effects > 0) {
         this.#onEffectsCommitted();
       }
@@ -251,10 +398,11 @@ export class Coordinator {
       retriesFor: (role) => policy.roles[role]?.retries ?? DEFAULT_STAGE_RETRIES,
       limits: policy.limits,
       nextTaskNo: () => this.#store.nextTaskNo(task.project_id),
+      approvalRefusal: (event) => approvalRefusal(this.#store, task, event.evidence_kinds),
     };
   }
 
-  #applyNow(taskId: string, event: Event): ApplyResult {
+  #applyNow(taskId: string, event: Event, rows?: EventRows): ApplyResult {
     const task = this.#store.getTask(taskId);
     if (task === undefined) {
       throw new TaskNotFoundError(taskId);
@@ -262,7 +410,7 @@ export class Coordinator {
     const stage = task.current_stage_id === null ? undefined : this.#store.getStage(task.current_stage_id);
     const now = this.#now();
     const outcome = transition(task, stage, event, this.#context(task));
-    const stageId = 'stage_id' in event ? event.stage_id : (task.current_stage_id ?? null);
+    const stageId = stageIdOf(event) ?? task.current_stage_id ?? null;
 
     if (outcome.ignored !== undefined) {
       this.#store.appendStageEvent({
@@ -318,6 +466,7 @@ export class Coordinator {
       to_state: outcome.next,
       created_at: now,
     });
+    rows?.(task);
     let effects = 0;
     for (const effect of outcome.effects) {
       this.#insertEffect(task.id, effect);

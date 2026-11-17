@@ -17,6 +17,15 @@ export const effectSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('integrate'), task_id: id }),
   /** Run the Recipe `release` step if declared (AD-13). */
   z.strictObject({ kind: z.literal('run_release'), task_id: id }),
+  /** Create the Task's Branch `antipod/<task_no>-<slug>` and worktree from `config_sha` (AD-5); on `approved`. */
+  z.strictObject({ kind: z.literal('prepare_branch'), task_id: id }),
+  /**
+   * Write `.antipod/tasks/<task_no>.yaml` from the rows and commit it on the Branch, the first such
+   * commit also removing the source inbox file (AD-21); the first effect on entering `implementing`.
+   */
+  z.strictObject({ kind: z.literal('commit_contract'), task_id: id }),
+  /** Fetch the Project, fast-forward `_main` and import new inbox files (AD-5). */
+  z.strictObject({ kind: z.literal('scan_inbox'), project_id: id }),
   /** The Mac was asleep for `gap_ms`; one per Project with an ACTIVE Task (AD-18). */
   z.strictObject({ kind: z.literal('back_online'), project_id: id, gap_ms: z.int().nonnegative() }),
   /** Strip the keyboard of the Task's card of Review round `round`; a new round has begun (AD-10). */

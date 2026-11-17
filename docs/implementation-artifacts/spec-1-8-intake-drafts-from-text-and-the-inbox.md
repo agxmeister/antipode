@@ -2,7 +2,8 @@
 title: 'Intake drafts from text and the inbox'
 type: 'feature'
 created: '2026-11-16'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'daa592ec1cd8483cad6bf961f842a5e8d1b375a3'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -88,13 +89,13 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/adapters/sqlite/migrations/0008-contracts.ts`, `src/core/ports/store.ts`, SQLite store -- rows and methods -- AD-2, AD-21
-- [ ] `src/core/domain/contract.ts`, `owner-instruction.ts`, `events.ts`, `effects.ts` -- domain, schemas, payloads -- AD-9, AD-16
-- [ ] `transitions.ts`, `coordinator.ts`, `scheduler.ts` -- Intake in `draft`, approval guard, undo, `commit_contract` on entry -- AD-3, AD-21
-- [ ] `src/core/ports/repo.ts`, `src/adapters/git/repo.ts` -- tree listing, worktree commit with removal -- AD-5
-- [ ] `src/app/intake.ts`, `src/app/stages.ts`, `src/app/daemon.ts` -- hook, brief, inbox scan, handlers -- AD-4, AD-9
-- [ ] `src/adapters/telegram/{poller.ts,cards/draft-card.ts,messenger.ts}` -- text routing, Draft card, commands -- AD-10, DESIGN
-- [ ] `test/**` -- one test per matrix row, plus a `transitions.test.ts` table update -- AD-24
+- [x] `src/adapters/sqlite/migrations/0008-contracts.ts`, `src/core/ports/store.ts`, SQLite store -- rows and methods -- AD-2, AD-21
+- [x] `src/core/domain/contract.ts`, `owner-instruction.ts`, `events.ts`, `effects.ts` -- domain, schemas, payloads -- AD-9, AD-16
+- [x] `transitions.ts`, `coordinator.ts`, `scheduler.ts` -- Intake in `draft`, approval guard, undo, `commit_contract` on entry -- AD-3, AD-21
+- [x] `src/core/ports/repo.ts`, `src/adapters/git/repo.ts` -- tree listing, worktree commit with removal -- AD-5
+- [x] `src/app/intake.ts`, `src/app/stages.ts`, `src/app/daemon.ts` -- hook, brief, inbox scan, handlers -- AD-4, AD-9
+- [x] `src/adapters/telegram/{poller.ts,cards/draft-card.ts,messenger.ts}` -- text routing, Draft card, commands -- AD-10, DESIGN
+- [x] `test/**` -- one test per matrix row, plus a `transitions.test.ts` table update -- AD-24
 
 **Acceptance Criteria:**
 - Given the fake `claude` returning `new_draft` with one question, when the Owner texts the bot, taps the quick answer and taps `Approve`, then the Task has `task_no` 1, the Branch and worktree exist, the card was edited in place with no repost, and no budget unit was used.
@@ -114,3 +115,38 @@ context:
 
 **Manual checks (if no CLI):**
 - With a scratch `ANTIPOD_HOME`, a second bot and the fake `claude`: text the bot, then check that the Draft card renders on a phone within one screen.
+
+## Review Triage Log
+
+Pass 1 (blind-hunter BH, edge-case-hunter EC, verification-gap VG).
+
+| # | Finding | Verdict | Evidence | Route |
+|---|---------|---------|----------|-------|
+| 1 | BH/EC/VG: `renderDraftCard` inserts a `bot` intake message on every open render; escaped entities | medium | `draft-card.ts` inserts unconditionally whenever `isOpen`; each tap re-renders, filling the `context_messages` window | patch |
+| 2 | BH/EC/VG: `approveDraft` checks dependency refusal after `#applyNow` applied | low | Unreachable today (`approvalRefusal` runs first in the same transaction), but the branch would commit `queued` without deps; fix is a reorder | patch |
+| 3 | BH/EC: one throwing inbox entry aborts the whole scan | medium | `scanInbox` loop has no per-entry catch; `readFile`/`createTask` throw propagates | patch |
+| 4 | BH/EC: `Intake.tick` stops at the first `requestInboxScan` throw | low | Loop has no per-Project catch; trivial fix | patch |
+| 5 | EC: `commitInWorktree` commits the whole index | low | `git commit` without pathspec; trivial fix | patch |
+| 6 | EC: all-dropped inbox YAML counts as complete | low | `isCompleteContract` checks only kinds; one-line fix | patch |
+| 7 | VG: missing tests (changed blob wait/new draft, inbox failure notice, refusal toast/card line, draft_reply answers/foreign id/not_actionable on revision, context_messages cap) | medium | `grep` finds no covering test for each branch | patch |
+| 8 | BH/EC: `commit_contract`/`prepare_branch` failure only marks the effect failed; `start_stage` still runs; no Owner notice | medium | `EffectExecutor.#runOne` marks failed and continues with the next row (pre-existing executor behavior) | defer |
+| 9 | EC: removing the inbox file on the Branch may delete a newer unimported blob at that path | medium | `commitContract` removes `source.path` regardless of blob | defer |
+| 10 | EC: reply to a card whose draft is in `draft` or `discard_pending` starts an unrelated new draft | medium | `onText` falls through to `createTask` when state is not `awaiting_approval`; spec does not say what such a reply does | defer |
+| 11 | BH/EC: Intake failing on a revision cancels the whole draft; `closed: 'cancelled'` renders no closing line | medium | Spec says `stage_retries_exhausted` in `draft` cancels; whether that covers revisions, and the closing copy, need an Owner decision | defer |
+| 12 | EC: Approve uses the local `origin/main` without fetching | low | Up to `git.fetch_interval_ms` stale; spec says "current main SHA" | defer |
+| 13 | VG: no test for `git.fetch_interval_ms` gating | low | Cost, not correctness | defer |
+| 14 | BH: Recipe-unreadable fallback differs across hook, scan and Approve | low | Rare (Recipe validated at registration); no button to resolve in that case | reject |
+| 15 | EC: symlinked `.antipod` in the Branch lets the projection write outside the worktree | low | Owner's own repo; unlikely; fix adds guards | reject |
+| 16 | EC: two `new_draft` instructions in one output, last wins | low | Schema-valid but unlikely; adds a branch | reject |
+| 17 | EC: generic `cancel` from `awaiting_approval` leaves live buttons | low | No path emits `cancel` there before 1-14; taps would get the stale toast | reject |
+| 18 | EC: `q_no` restarts after revision so an old button answers a new Q1 | low | The card is edited in place, so old buttons are replaced | reject |
+| 19 | EC: ready-path `draft_ready` ignored would strand the Task | false | A just-created `draft` Task always accepts `draft_ready` without `stage_id` | reject |
+| 20 | EC: answering a question does not bump `contract_version` | false | Questions are draft rows, not contract rows; the spec's bump rule is about criteria | reject |
+| 21 | BH: spec and sprint status disagree | false | Workflow syncs sprint status at presentation | reject |
+| 22 | BH: approval checks run three times | low | Redundant work only, no harm | reject |
+| 23 | BH: first scan is at the first 1 s tick, not at boot | low | Negligible | reject |
+| 24 | BH: `commitInWorktree` rejects `..x` names, never pushes | false | Paths are fixed `.antipod/tasks/N.yaml`; Branch push is 1-9 per spec | reject |
+| 25 | BH: `intake_failed` with no Task throws | false | Effect always carries `task_id` | reject |
+| 26 | BH: refusal toast has no length cap | low | Reasons are short fixed strings | reject |
+| 27 | BH: text drafts cannot carry `depends_on` | false | By design; Intake output has no deps in this story | reject |
+| 28 | BH: `poller.ts` ticked but unchanged; `daemon.test` reaction assertion loosened | low | `onText` already existed and is wired in `daemon.ts`; looser assertion still checks message 9 only | reject |

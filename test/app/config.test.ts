@@ -31,6 +31,7 @@ describe('config', () => {
       intake: { retries: 2, context_messages: 10 },
       outbox: { retries: 5 },
       telegram: { stale_after_ms: 300_000 },
+      git: { fetch_interval_ms: 60_000 },
       roles: {
         intake: { timeout_ms: 300_000, retries: 2, max_turns: 25 },
         implementer: { timeout_ms: 2_700_000, retries: 2, max_turns: 150 },

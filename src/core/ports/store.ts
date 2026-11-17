@@ -1,3 +1,4 @@
+import type { ContractRow, ContractSourceRow, CriterionRow, DraftQuestionRow, IntakeMessageRow } from '../domain/contract.ts';
 import type { EffectRow, EffectStatus } from '../domain/effects.ts';
 import type { StageEventRow } from '../domain/events.ts';
 import type { Stage, StagePatch, StageStatus } from '../domain/stage.ts';
@@ -36,6 +37,35 @@ export interface Store {
   queuedTasks(): Task[];
   /** Whether the Project has a `bootstrap` Task in `released` (the bootstrap gate, AD-11). */
   bootstrapReleased(projectId: string): boolean;
+
+  /** The Task numbered `taskNo` in the Project (AD-16). */
+  taskByNo(projectId: string, taskNo: number): Task | undefined;
+
+  /** Inserts one version of a Task's contract (AD-21). */
+  insertContract(row: ContractRow): void;
+  /** The highest version of the Task's contract. */
+  latestContract(taskId: string): ContractRow | undefined;
+  /** Inserts or replaces the criterion `(task_id, ac_no)`. */
+  saveCriterion(row: CriterionRow): void;
+  /** Every criterion of the Task, dropped ones included, `ac_no` order. */
+  criteriaOf(taskId: string): CriterionRow[];
+  insertQuestion(row: DraftQuestionRow): void;
+  /** Every question of the draft, `q_no` order. */
+  questionsOf(taskId: string): DraftQuestionRow[];
+  /** Records the answer of an open question; false when it does not exist or is already answered. */
+  answerQuestion(taskId: string, qNo: number, answer: string): boolean;
+  /** Deletes the draft's unanswered questions (a revision replaces them). */
+  deleteOpenQuestions(taskId: string): void;
+  /** Records an imported inbox file (AD-5). */
+  insertContractSource(row: ContractSourceRow): void;
+  getContractSource(projectId: string, path: string, blobSha: string): ContractSourceRow | undefined;
+  /** Every recorded blob at `path` in the Project, oldest first. */
+  contractSourcesAt(projectId: string, path: string): ContractSourceRow[];
+  /** The inbox file a Task came from, if it came from one. */
+  contractSourceOfTask(taskId: string): ContractSourceRow | undefined;
+  insertIntakeMessage(row: IntakeMessageRow): void;
+  /** Every Intake message of the Task, oldest first. */
+  intakeMessagesOf(taskId: string): IntakeMessageRow[];
 
   /** Records that `taskId` waits for `dependsOnTaskId` to merge (CAP-15); repeating a pair is a no-op. */
   insertDependency(taskId: string, dependsOnTaskId: string): void;

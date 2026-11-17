@@ -51,3 +51,21 @@
 - source_spec: `docs/implementation-artifacts/spec-1-7-claude-cli-agentrunner-and-role-configs.md`
   summary: Run the spec's Owner-run manual check with real `claude` and a scratch `ANTIPOD_HOME`: a shipped Implementer Stage cannot write `.antipod/tasks/x.yaml` or read `$ANTIPOD_HOME/config.yaml`, ignores an `allow: ["Bash(*)"]` planted in the worktree's `.claude/settings.local.json`, lists no MCP server beyond the Role's `mcp.json`, and the materialized `permissions.json` holds `//`-prefixed realpath'd absolute rules with one deny per sibling worktree.
   evidence: Unverified, high if wrong. Fake-`claude` tests assert the argv and the rule text, not enforcement; Stage containment rests on Claude Code reading `--setting-sources ''` as no source and `//path` rules as absolute. Owner deferred it in the story 1-7 walkthrough (2026-11-16); run before Stages run unattended on a real Project, together with the SIGTERM-grace and orphan checks above.
+- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
+  summary: Make a failed `commit_contract` or `prepare_branch` block the Implementer `start_stage` and reach the Owner as an outbox notice, not only a `failed` effect row.
+  evidence: `EffectExecutor.#runOne` marks a throwing effect `failed` and drains the next row, so the Implementer can start without the Branch projection and the Owner sees `⏳ Queued` with nothing following (review pass 1, #8).
+- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
+  summary: Remove the source inbox file in the first contract commit only when the Branch blob at that path still equals the imported `blob_sha`.
+  evidence: If the Owner pushes a newer blob at the same path before `commit_contract` runs, the newer, unimported file is removed on the Branch and disappears from `main` at merge (review pass 1, #9).
+- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
+  summary: Decide what a reply to a Draft card does while that draft is in `draft` (Intake rerunning) or `discard_pending`; today it silently creates an unrelated new draft.
+  evidence: `Intake.onText` routes to `draft_reply` only for `awaiting_approval` and otherwise falls through to `createTask` (review pass 1, #10). Needs an Owner decision.
+- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
+  summary: Decide whether Intake exhausting retries on a revision (a `draft_reply`) should return the draft to `awaiting_approval` on its previous version instead of cancelling it, and give the closed card a state line.
+  evidence: `stage_retries_exhausted` in `draft` always cancels; a card closed with `closed: 'cancelled'` keeps its old text with `· draft` and no buttons (review pass 1, #11). Needs an Owner decision; the spec text reads as cancel.
+- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
+  summary: Fetch before reading `main` at Approve so `config_sha` and the feasibility check use the current `main`.
+  evidence: The Approve handler reads the local `origin/main`, up to `git.fetch_interval_ms` stale (review pass 1, #12).
+- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
+  summary: Add a test that ticks inside `git.fetch_interval_ms` queue no second `scan_inbox` and a tick after it does.
+  evidence: The only rescan test advances exactly 60 s and would pass without the gate (review pass 1, #13).

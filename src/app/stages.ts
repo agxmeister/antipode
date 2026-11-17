@@ -1,7 +1,10 @@
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { RoleConfigResolver, RoleVars } from '../adapters/claude-cli/role-config.ts';
-import type { Coordinator } from '../core/coordinator/coordinator.ts';
+import { INTAKE_ROLE, type Coordinator, type EventRows } from '../core/coordinator/coordinator.ts';
+import { sortedCriteria } from '../core/coordinator/drafts.ts';
+import type { ContractRow, CriterionRow, DraftQuestionRow, IntakeMessageRow } from '../core/domain/contract.ts';
+import { EVIDENCE_KINDS, RECIPE_FILE } from '../core/domain/recipe.ts';
 import type { EffectOf } from '../core/domain/effects.ts';
 import type { Event } from '../core/domain/events.ts';
 import { roleLimits, type RoleLimits } from '../core/domain/role.ts';
@@ -12,6 +15,7 @@ import type { AgentAuth, AgentRunner, AgentRunSpec } from '../core/ports/agent-r
 import { silentLog, type Log } from '../core/ports/log.ts';
 import type { Repo } from '../core/ports/repo.ts';
 import type { Store } from '../core/ports/store.ts';
+import { validateRecipeText } from './recipe-file.ts';
 import { readInstanceSecrets } from './secrets.ts';
 
 /** `stage_failed` reason of an attempt that could not be launched (AD-4; deferred 1-2 item). */
@@ -19,7 +23,9 @@ export const LAUNCH = 'launch';
 /** `stage_failed` reason of valid output no event and no output hook maps (Owner decision 2026-11-15). */
 export const UNHANDLED_OUTPUT = 'unhandled_output';
 /** The Role whose Stages run in the Project's read-only `_main` checkout (AD-4). */
-export const INTAKE_ROLE = 'intake';
+export { INTAKE_ROLE };
+/** `intake.context_messages` when the config gives none. */
+export const DEFAULT_CONTEXT_MESSAGES = 10;
 /** The daemon variables a Stage inherits; nothing else of the daemon's env reaches it. */
 export const STAGE_ENV_PASSTHROUGH = ['HOME', 'LANG', 'TMPDIR'] as const;
 
@@ -31,11 +37,17 @@ export interface StageOutputInput {
   usage: StageUsage | null;
 }
 
+/** An event with the rows that belong to it, written in its transaction only when it applies (AD-3). */
+export interface HookResult {
+  event: Event;
+  rows: EventRows;
+}
+
 /**
  * Maps a Role's valid output that has no fixed event to one (filled by 1-8, 1-9, 1-10). Returning
  * undefined fails the Stage `unhandled_output`.
  */
-export type OutputHook = (input: StageOutputInput) => Event | undefined | Promise<Event | undefined>;
+export type OutputHook = (input: StageOutputInput) => Event | HookResult | undefined | Promise<Event | HookResult | undefined>;
 
 export interface StagesOptions {
   store: Store;
@@ -53,7 +65,7 @@ export interface StagesOptions {
   /** `run/bin/`, first on every Stage's `PATH`. */
   runBin: string;
   /** Read at every launch so SIGHUP applies. */
-  config: () => { roles: Readonly<Record<string, Partial<RoleLimits>>>; agent: { auth: AgentAuth } };
+  config: () => { roles: Readonly<Record<string, Partial<RoleLimits>>>; agent: { auth: AgentAuth }; intake?: { context_messages: number } };
   /** Where `PATH`, `HOME`, `LANG` and `TMPDIR` come from; `process.env` by default. */
   baseEnv?: NodeJS.ProcessEnv;
   log?: Log;
@@ -235,10 +247,17 @@ export class Stages {
     const task = this.#options.store.getTask(stage.task_id);
     if (task === undefined) return;
     let event = eventForOutput(schema, task.state, output, stage.id, usage);
+    let rows: EventRows | undefined;
     if (event === undefined) {
       const hook = this.#hooks.get(stage.role);
       try {
-        event = hook === undefined ? undefined : await hook({ task, stage, output, usage });
+        const result = hook === undefined ? undefined : await hook({ task, stage, output, usage });
+        if (result !== undefined && 'rows' in result) {
+          event = result.event;
+          rows = result.rows;
+        } else {
+          event = result;
+        }
       } catch (error) {
         this.#log.error({ event: 'stage_output_hook_failed', ...fields, error: errorText(error) }, 'stage_output_hook_failed');
         event = undefined;
@@ -247,8 +266,9 @@ export class Stages {
     if (event === undefined) {
       this.#log.warn({ event: 'stage_output_unhandled', ...fields, output_schema: schema }, 'stage_output_unhandled');
       event = { type: 'stage_failed', stage_id: stage.id, reason: UNHANDLED_OUTPUT, usage };
+      rows = undefined;
     }
-    await this.#options.coordinator.applyEvent(task.id, event);
+    await this.#options.coordinator.applyEvent(task.id, event, rows);
   }
 
   async #fail(taskId: string, stageId: string, reason: string, error: unknown): Promise<void> {
@@ -292,7 +312,7 @@ export class Stages {
       spec: {
         stageId: stage.id,
         cwd,
-        prompt: renderBrief(task, stage, limits),
+        prompt: renderBrief(task, stage, limits, stage.role === INTAKE_ROLE ? await this.#intakeBrief(project, task) : undefined),
         transcriptPath: this.transcriptPath(stage.id),
         outputSchema: OUTPUT_SCHEMAS[schema],
         settingsPath: files.settingsPath,
@@ -304,6 +324,34 @@ export class Stages {
         auth: config.agent.auth,
         env: this.#env(stage, task, prior, config.agent.auth),
       },
+    };
+  }
+
+  /**
+   * What the Intake brief is rendered from, all rows (AD-4, AD-21): the source, the current contract,
+   * the questions, the last `intake.context_messages` Owner and bot messages, and the Evidence kinds of
+   * the Recipe at `config_sha` (CAP-4).
+   */
+  async #intakeBrief(project: Project, task: Task): Promise<IntakeBrief> {
+    const { store, repo } = this.#options;
+    let evidenceKinds: readonly string[] = EVIDENCE_KINDS;
+    if (task.config_sha !== null) {
+      const text = await repo.readFile(project.name, task.config_sha, RECIPE_FILE).catch(() => undefined);
+      const recipe = text === undefined ? undefined : validateRecipeText(text);
+      if (recipe?.ok === true) evidenceKinds = recipe.recipe.evidence_kinds;
+    }
+    const messages = store.intakeMessagesOf(task.id);
+    const [source, ...rest] = messages;
+    const limit = this.#options.config().intake?.context_messages ?? DEFAULT_CONTEXT_MESSAGES;
+    return {
+      draftId: task.id,
+      title: task.title ?? null,
+      evidenceKinds,
+      source,
+      contract: store.latestContract(task.id),
+      criteria: sortedCriteria(store.criteriaOf(task.id)),
+      questions: store.questionsOf(task.id),
+      messages: limit === 0 ? [] : rest.slice(-limit),
     };
   }
 
@@ -377,12 +425,85 @@ export function realPath(path: string): string {
   return parent === path ? path : join(realPath(parent), basename(path));
 }
 
+/** The rows an Intake brief is rendered from (AD-4). */
+export interface IntakeBrief {
+  draftId: string;
+  title: string | null;
+  evidenceKinds: readonly string[];
+  /** The message or inbox file the draft came from. */
+  source: IntakeMessageRow | undefined;
+  contract: ContractRow | undefined;
+  criteria: readonly CriterionRow[];
+  questions: readonly DraftQuestionRow[];
+  /** The latest Owner and bot messages after the source, oldest first. */
+  messages: readonly IntakeMessageRow[];
+}
+
+const SENDER_LABEL = { owner: 'Owner', bot: 'Antipode', inbox: 'Inbox file' } as const;
+
+/** The Intake part of the brief: everything Intake reads, from rows only (AD-4, AD-21). */
+export function renderIntakeBrief(brief: IntakeBrief): string {
+  const lines = [
+    '## Intake',
+    '',
+    `This draft's id is \`${brief.draftId}\`. The Project can produce these Evidence kinds: ${brief.evidenceKinds.join(', ')}.`,
+    'Propose `required_evidence` only from that list. When the Owner asks for something no kind can show, give the closest kind',
+    'and set `infeasible` to what was asked for and what you propose instead.',
+    '',
+  ];
+  if (brief.source !== undefined) {
+    lines.push(`### Source (${SENDER_LABEL[brief.source.sender]})`, '', brief.source.text, '');
+  }
+  if (brief.contract !== undefined) {
+    lines.push(`### Current draft (version ${brief.contract.version})`, '');
+    if (brief.title !== null) lines.push(`Title: ${brief.title}`);
+    lines.push(`Goal: ${brief.contract.goal}`, '');
+    for (const criterion of brief.criteria) {
+      const flags = criterion.status === 'dropped' ? ' (dropped)' : criterion.infeasible_wanted === null ? '' : ` (can't evidence ${criterion.infeasible_wanted})`;
+      lines.push(`- AC${criterion.ac_no} [${criterion.required_evidence}]${flags}: ${criterion.text}`);
+    }
+    lines.push('');
+  }
+  const answered = brief.questions.filter((question) => question.answer !== null);
+  const open = brief.questions.filter((question) => question.answer === null);
+  if (answered.length > 0) {
+    lines.push('### Answered questions', '', ...answered.map((question) => `- Q${question.q_no} ${question.text} → ${question.answer}`), '');
+  }
+  if (open.length > 0) {
+    lines.push('### Unanswered questions', '', ...open.map((question) => `- Q${question.q_no} ${question.text}`), '');
+  }
+  if (brief.messages.length > 0) {
+    lines.push('### Recent messages', '', ...brief.messages.map((message) => `- ${SENDER_LABEL[message.sender]}: ${message.text}`), '');
+  }
+  lines.push(
+    '### What to return',
+    '',
+    brief.contract === undefined
+      ? '- A request for work: one `new_draft` with a short title, the goal, numbered criteria and at most two questions (quick answers when the answer is closed).'
+      : `- A revision of this draft: one \`new_draft\` with the whole revised contract; give \`ac\` for every criterion you keep. Answers to the questions go in a \`draft_reply\` with \`draft_id\` \`${brief.draftId}\`.`,
+    '- Nothing to do: one `not_actionable` with the reason.',
+    '',
+  );
+  return lines.join('\n');
+}
+
 /**
- * The Stage brief, rendered from the Task row only (AD-21): number, Role, attempt and how to run
- * Recipe steps. Contract, criteria, Correction note and Parking Lot join it in 1-8, 1-9 and 1-10.
+ * The Stage brief, rendered from rows only (AD-21): number, Role, attempt and how to run Recipe steps;
+ * for Intake also the draft (`renderIntakeBrief`). Correction note and Parking Lot join it in 1-9 and 1-10.
  */
-export function renderBrief(task: Task, stage: Stage, limits: RoleLimits): string {
+export function renderBrief(task: Task, stage: Stage, limits: RoleLimits, intake?: IntakeBrief): string {
   const name = task.task_no === null ? 'a draft Task (no number yet)' : `Task #${task.task_no}`;
+  if (intake !== undefined) {
+    return [
+      `# Antipode Stage brief`,
+      '',
+      `You are running the ${stage.role} Role for ${name}, attempt ${stage.attempt} of ${limits.retries + 1}.`,
+      '',
+      renderIntakeBrief(intake),
+      'Your final answer is the structured output the schema asks for.',
+      '',
+    ].join('\n');
+  }
   return [
     `# Antipode Stage brief`,
     '',

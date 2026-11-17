@@ -178,7 +178,8 @@ export class Scheduler {
       return 'run';
     }
     await this.#coordinator.setWaitingReason(task.id, 'usage_window');
-    await this.#notifyWait(task.id, hold.resets_at);
+    // Intake is held only by this gate (AD-11); a draft has no number for the notice to name.
+    if (task.task_no !== null) await this.#notifyWait(task.id, hold.resets_at);
     return 'held';
   };
 
@@ -310,8 +311,9 @@ export class Scheduler {
     if (this.#hold() !== null) {
       return;
     }
+    // A held Intake launch belongs to a `draft`, which is not ACTIVE.
     const held = this.#store
-      .tasksInStates(ACTIVE_STATES.filter((state) => state !== 'queued'))
+      .tasksInStates([...ACTIVE_STATES.filter((state) => state !== 'queued'), 'draft'])
       .filter((task) => task.waiting_reason === 'usage_window');
     for (const task of held) {
       await this.#coordinator.setWaitingReason(task.id, null);

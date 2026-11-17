@@ -71,6 +71,12 @@ export const configSchema = z.strictObject({
       stale_after_ms: positiveInt.default(300_000),
     })
     .prefault({}),
+  git: z
+    .strictObject({
+      /** Each Project is fetched at boot and then on this interval; the inbox is scanned after every fetch (AD-5). */
+      fetch_interval_ms: positiveInt.default(60_000),
+    })
+    .prefault({}),
   roles: z
     .object({
       intake: roleSchema({ timeout_ms: 5 * MINUTE, retries: 2, max_turns: 25 }),

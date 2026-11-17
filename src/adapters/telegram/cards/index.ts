@@ -3,6 +3,7 @@ import type { EffectOf } from '../../../core/domain/effects.ts';
 import type { Task } from '../../../core/domain/task.ts';
 import type { OutboxDraft } from '../../../core/domain/telegram.ts';
 import type { CardEnv } from './card.ts';
+import { DRAFT_CARD, renderDraftCard } from './draft-card.ts';
 import { usageWindowResumedCard } from './usage-window-resumed.ts';
 import { usageWindowWaitCard } from './usage-window-wait.ts';
 
@@ -27,6 +28,7 @@ function numbered(input: NoticeInput): { task: Task; task_no: number } {
 /** `notice_kind` → template; later stories add their kinds through `TelegramMessenger.registerNotice`. */
 export function defaultNotices(): Map<string, NoticeRenderer> {
   return new Map<string, NoticeRenderer>([
+    [DRAFT_CARD, renderDraftCard],
     [
       USAGE_WINDOW_WAIT,
       (input, env) => {
