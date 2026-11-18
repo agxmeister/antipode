@@ -110,8 +110,10 @@ export class Intake {
   }
 
   /**
-   * Owner text that is not a command (CAP-7): a reply to an open Draft card is `draft_reply` and reruns
-   * Intake on that draft; anything else is a `new_draft` with its own scratch draft and Intake Stage.
+   * Owner text that is not a command (CAP-7): a reply to a Draft card revises that draft, anything else
+   * is a `new_draft` with its own scratch draft and Intake Stage. A reply while the discard is pending
+   * undoes it first; a reply while Intake is revising the draft is recorded, and that run's `draft_ready`
+   * carries it so Intake reruns with it.
    */
   async onText(input: InboundMessage): Promise<void> {
     const { project } = input;
@@ -119,12 +121,22 @@ export class Intake {
     if (project === undefined || text === '') return;
     const reply = input.replyTo;
     if (reply?.kind === DRAFT_CARD && reply.task_id !== null) {
-      const task = this.#store.getTask(reply.task_id);
-      if (task?.state === 'awaiting_approval' && task.project_id === project.id) {
-        const result = await this.#coordinator.applyEvent(task.id, { type: 'draft_reply', text }, (t) =>
-          this.#store.insertIntakeMessage(this.#message(t.id, 'owner', text, input.messageId)),
-        );
-        if (result.applied) return;
+      let task = this.#store.getTask(reply.task_id);
+      if (task?.project_id === project.id) {
+        if (task.state === 'discard_pending') {
+          await this.#coordinator.applyEvent(task.id, { type: 'undone' });
+          task = this.#store.getTask(task.id);
+        }
+        if (task?.state === 'draft' && this.#store.latestContract(task.id) !== undefined) {
+          this.#store.insertIntakeMessage(this.#message(task.id, 'owner', text, input.messageId));
+          return;
+        }
+        if (task?.state === 'awaiting_approval') {
+          const result = await this.#coordinator.applyEvent(task.id, { type: 'draft_reply', text }, (t) =>
+            this.#store.insertIntakeMessage(this.#message(t.id, 'owner', text, input.messageId)),
+          );
+          if (result.applied) return;
+        }
       }
     }
     const configSha = await this.#mainSha(project);
@@ -158,7 +170,12 @@ export class Intake {
       else return undefined;
     }
     const hasContract = this.#store.latestContract(task.id) !== undefined;
-    const ready: Event = { type: 'draft_ready', stage_id: stage.id, usage };
+    // Owner replies that arrived after this run launched are not in its brief: Intake reruns with them.
+    // The row, not the launch-time object, holds `started_at`.
+    const startedAt = this.#store.getStage(stage.id)?.started_at ?? stage.started_at;
+    const started = startedAt === null ? undefined : Date.parse(startedAt);
+    const replies = started === undefined || !hasContract ? [] : this.#store.intakeMessagesOf(task.id).filter((m) => m.sender === 'owner' && Date.parse(m.at) > started);
+    const ready: Event = { type: 'draft_ready', stage_id: stage.id, usage, ...(replies.length === 0 ? {} : { reply: replies.map((m) => m.text).join('\n\n') }) };
     if (notActionable) {
       if (newDraft !== undefined || draftReply !== undefined) return undefined;
       return hasContract ? ready : { type: 'cancel', stage_id: stage.id, usage };
@@ -298,7 +315,7 @@ export class Intake {
   /**
    * The `commit_contract` handler (AD-21): writes `.antipod/tasks/<task_no>.yaml` from the rows and
    * commits `antipod: contract v<version>` on the Branch, removing the source inbox file while it is
-   * still there (so only the first commit does). Commits nothing when the Branch already holds this version.
+   * still the imported blob (so only the first commit does, and a newer blob there is kept). Commits nothing when the Branch already holds this version.
    */
   async commitContract(effect: EffectOf<'commit_contract'>): Promise<void> {
     const task = this.#store.getTask(effect.task_id);
@@ -314,7 +331,8 @@ export class Intake {
       criteria: this.#store.criteriaOf(task.id),
     });
     const source = this.#store.contractSourceOfTask(task.id);
-    const commit = await this.#repo.commitInWorktree(worktree, { [contractPath(task.task_no)]: yaml }, source === undefined ? [] : [source.path], contractCommitMessage(contract.version));
+    const removals = source === undefined ? [] : [{ path: source.path, blob_sha: source.blob_sha }];
+    const commit = await this.#repo.commitInWorktree(worktree, { [contractPath(task.task_no)]: yaml }, removals, contractCommitMessage(contract.version));
     this.#log.info({ event: 'contract_committed', task_id: task.id, version: contract.version, commit: commit ?? null }, 'contract_committed');
   }
 
@@ -358,6 +376,10 @@ export class Intake {
           handle: async ({ task }) => {
             const project = this.#store.getProject(task!.project_id);
             if (project === undefined) return stale;
+            // `config_sha` and feasibility come from the current `main`, not the last periodic fetch.
+            await this.#repo.fetch(project.name).catch((error: unknown) => {
+              this.#log.warn({ event: 'approve_fetch_failed', project_id: project.id, error: errorText(error) }, 'approve_fetch_failed');
+            });
             const sha = (await this.#mainSha(project)) ?? task!.config_sha;
             const kinds = await this.#evidenceKinds(project, sha);
             if (kinds === undefined) return { toast: TOAST.noRecipe };

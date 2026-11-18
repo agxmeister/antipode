@@ -297,6 +297,12 @@ describe('Stage retries (AD-4)', () => {
     expect(outcome.patch.budget_used).toBeUndefined();
   });
 
+  it('draft_ready carrying a reply that came during the run derives draft_reply', () => {
+    const outcome = applied(transition(task('draft'), stage('draft'), { type: 'draft_ready', stage_id: CURRENT, reply: 'and make it red' }, ctx()));
+    expect(outcome.next).toBe('awaiting_approval');
+    expect(outcome.derived).toEqual([{ type: 'draft_reply', text: 'and make it red' }]);
+  });
+
   it('stage_failed on attempt 3 derives stage_retries_exhausted with a reason', () => {
     const outcome = applied(transition(task('validating'), stage('validating', { attempt: 3 }), { type: 'stage_failed', stage_id: CURRENT, reason: 'exit 1' }, ctx()));
     expect(outcome.next).toBe('validating');

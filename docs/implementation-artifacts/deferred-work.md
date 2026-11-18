@@ -55,17 +55,5 @@
   summary: Make a failed `commit_contract` or `prepare_branch` block the Implementer `start_stage` and reach the Owner as an outbox notice, not only a `failed` effect row.
   evidence: `EffectExecutor.#runOne` marks a throwing effect `failed` and drains the next row, so the Implementer can start without the Branch projection and the Owner sees `⏳ Queued` with nothing following (review pass 1, #8).
 - source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
-  summary: Remove the source inbox file in the first contract commit only when the Branch blob at that path still equals the imported `blob_sha`.
-  evidence: If the Owner pushes a newer blob at the same path before `commit_contract` runs, the newer, unimported file is removed on the Branch and disappears from `main` at merge (review pass 1, #9).
-- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
-  summary: Decide what a reply to a Draft card does while that draft is in `draft` (Intake rerunning) or `discard_pending`; today it silently creates an unrelated new draft.
-  evidence: `Intake.onText` routes to `draft_reply` only for `awaiting_approval` and otherwise falls through to `createTask` (review pass 1, #10). Needs an Owner decision.
-- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
-  summary: Decide whether Intake exhausting retries on a revision (a `draft_reply`) should return the draft to `awaiting_approval` on its previous version instead of cancelling it, and give the closed card a state line.
-  evidence: `stage_retries_exhausted` in `draft` always cancels; a card closed with `closed: 'cancelled'` keeps its old text with `· draft` and no buttons (review pass 1, #11). Needs an Owner decision; the spec text reads as cancel.
-- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
-  summary: Fetch before reading `main` at Approve so `config_sha` and the feasibility check use the current `main`.
-  evidence: The Approve handler reads the local `origin/main`, up to `git.fetch_interval_ms` stale (review pass 1, #12).
-- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
-  summary: Add a test that ticks inside `git.fetch_interval_ms` queue no second `scan_inbox` and a tick after it does.
-  evidence: The only rescan test advances exactly 60 s and would pass without the gate (review pass 1, #13).
+  summary: When Intake exhausts its retries on a revision (a `draft_reply`), return the draft to `awaiting_approval` on its previous version, mark the Owner's reply `❌` with `Couldn't process that — send it again.`, and keep cancelling only a first run.
+  evidence: Owner decided this in the story 1-8 walkthrough (2026-11-18). Blocked on `bmad-correct-course`: the spine AD-3 generic rule sends `stage_retries_exhausted` to `stuck` and draws no `draft --> awaiting_approval` arrow for it. Today the transition cancels, and the closed card keeps `· draft` with no state line (review pass 1, #11).

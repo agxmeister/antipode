@@ -342,6 +342,38 @@ describe('Intake drafts from Owner text (CAP-7, CAP-8, CAP-9)', () => {
     expect(h.tg.callsOf('sendMessage')[0]).toMatchObject({ text: INTAKE_FAILED_REPLY, reply_parameters: { message_id: 70 } });
   });
 
+  it('a reply while Intake is revising the draft is not a new draft: Intake reruns with it once that run ends', async () => {
+    const h = await harness([output(newDraft())]);
+    const task = await textToDraftCard(h);
+    setFakeRuns(h.fake, [output(newDraft()), { ...output(newDraft({ goal: 'Revision one.' })), sleepMs: 1_500 }, output(newDraft({ goal: 'Revision two.' }))]);
+    h.push((id) => textUpdate(id, 'make the timer big', { messageId: 55, replyTo: cardMessageId(h) }));
+    await vi.waitFor(() => expect(h.daemon.store.stagesOfTask(task.id).at(-1)?.status).toBe('running'), { timeout: 10_000 });
+    h.clock.advance(1_000);
+    h.push((id) => textUpdate(id, 'and make it red', { messageId: 56, replyTo: cardMessageId(h) }));
+    await vi.waitFor(() => expect(h.daemon.store.latestContract(task.id)?.goal).toBe('Revision two.'), { timeout: 15_000 });
+    await vi.waitFor(() => expect(h.daemon.store.getTask(task.id)?.state).toBe('awaiting_approval'));
+    expect(h.daemon.store.tasksInStates(['draft', 'awaiting_approval', 'cancelled'])).toHaveLength(1);
+    const briefs = fakeCalls(h.fake).map((call) => call.stdin);
+    expect(briefs).toHaveLength(3);
+    expect(briefs[1]).not.toContain('and make it red');
+    expect(briefs[2]).toContain('and make it red');
+    expect(h.cardSends()).toHaveLength(1);
+  });
+
+  it('a reply while the discard is pending undoes it and revises the draft', async () => {
+    const h = await harness([output(newDraft())]);
+    const task = await textToDraftCard(h);
+    h.tap('Discard');
+    await vi.waitFor(() => expect(h.daemon.store.getTask(task.id)?.state).toBe('discard_pending'));
+    setFakeRuns(h.fake, [output(newDraft()), output(newDraft({ goal: 'Revised after all.' }))]);
+    h.push((id) => textUpdate(id, 'wait, keep it but 60 seconds', { messageId: 57, replyTo: cardMessageId(h) }));
+    await vi.waitFor(() => expect(h.daemon.store.latestContract(task.id)?.goal).toBe('Revised after all.'), { timeout: 10_000 });
+    await vi.waitFor(() => expect(h.daemon.store.getTask(task.id)).toMatchObject({ state: 'awaiting_approval', undo_expires_at: null }));
+    await vi.waitFor(() => expect(rows(h)).toEqual([['Approve', 'Discard']]));
+    expect(h.daemon.store.tasksInStates(['draft', 'awaiting_approval', 'cancelled'])).toHaveLength(1);
+    expect(h.cardSends()).toHaveLength(1);
+  });
+
   it('Discard, Undo within the minute, Discard again; after 60 s the draft is cancelled and the card reads Discarded', async () => {
     const h = await harness([output(newDraft({ goal: 'Timer & sets <fast>' }))]);
     const task = await textToDraftCard(h);
@@ -445,6 +477,30 @@ describe('Intake drafts from the inbox (CAP-6, AD-5)', () => {
     expect(notice!['text']).toContain('<code>.antipod/inbox/b.md</code>');
     expect(notice).not.toHaveProperty('reply_parameters');
     expect(h.tg.callsOf('setMessageReaction')).toEqual([]);
+  });
+
+  it('rescans only once git.fetch_interval_ms has passed since the last scan', async () => {
+    const h = await harness([output(newDraft())], { '.antipod/inbox/a.yaml': COMPLETE_CONTRACT });
+    await scanned(h);
+    await vi.waitFor(() => expect(h.cardSends()).toHaveLength(1));
+    h.remote.commit({ '.antipod/inbox/b.yaml': COMPLETE_CONTRACT.replace('Dark mode', 'Light mode') });
+    h.clock.advance(59_999);
+    await scanned(h);
+    expect(h.tasks()).toHaveLength(1);
+    h.clock.advance(1);
+    await scanned(h);
+    await vi.waitFor(() => expect(h.tasks()).toHaveLength(2));
+  });
+
+  it('Approve fetches first: config_sha is the main pushed since the last scan', async () => {
+    const h = await harness([output(newDraft())], { '.antipod/inbox/a.yaml': COMPLETE_CONTRACT });
+    await scanned(h);
+    await vi.waitFor(() => expect(h.cardSends()).toHaveLength(1));
+    const [draft] = h.tasks();
+    const pushed = h.remote.commit({ 'README.md': 'pushed after the scan\n' });
+    h.tap('Approve');
+    await vi.waitFor(() => expect(h.daemon.store.getTask(draft!.id)?.state).toBe('queued'));
+    expect(h.daemon.store.getTask(draft!.id)?.config_sha).toBe(pushed);
   });
 
   it('a refused Approve tap shows the reason in the toast and on the edited card', async () => {

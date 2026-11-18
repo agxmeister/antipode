@@ -169,7 +169,12 @@ export class GitRepo implements Repo {
     return entries;
   }
 
-  async commitInWorktree(worktree: string, files: Readonly<Record<string, string>>, removals: readonly string[], message: string): Promise<string | undefined> {
+  async commitInWorktree(
+    worktree: string,
+    files: Readonly<Record<string, string>>,
+    removals: ReadonlyArray<{ path: string; blob_sha: string }>,
+    message: string,
+  ): Promise<string | undefined> {
     const inside = (path: string): string => {
       const full = resolve(worktree, path);
       const rel = relative(worktree, full);
@@ -183,11 +188,16 @@ export class GitRepo implements Repo {
     }
     const paths = Object.keys(files);
     if (paths.length > 0) await this.#git(['-C', worktree, 'add', '--', ...paths]);
-    for (const path of removals) {
+    const removed: string[] = [];
+    for (const { path, blob_sha } of removals) {
       inside(path);
-      await this.#git(['-C', worktree, 'rm', '--quiet', '--ignore-unmatch', '--', path]);
+      // `<mode> <object> <stage>\t<path>`: only the blob that was imported goes; a newer one stays (AD-5).
+      const staged = (await this.#git(['-C', worktree, 'ls-files', '--stage', '-z', '--', path])).split('\0')[0] ?? '';
+      if (staged.split(' ')[1] !== blob_sha) continue;
+      await this.#git(['-C', worktree, 'rm', '--quiet', '--', path]);
+      removed.push(path);
     }
-    const touched = [...paths, ...removals];
+    const touched = [...paths, ...removed];
     if (touched.length === 0) return undefined;
     // Only these paths that actually changed: anything else already staged stays out of this commit,
     // and a removal that matched nothing is no pathspec for `commit`.

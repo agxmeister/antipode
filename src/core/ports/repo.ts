@@ -20,11 +20,11 @@ export interface Repo {
   /** Every file (blob, symlinks excluded) under `dir` at commit `sha`, recursively, with its blob SHA. */
   listTree(name: string, sha: string, dir: string): Promise<Array<{ path: string; blob_sha: string }>>;
   /**
-   * Writes `files` (repo-relative path → text) into the worktree at `worktree`, `git rm`s `removals`
-   * (absent ones are fine) and commits with `message`. Resolves the new commit, or undefined when
-   * nothing changed and nothing was committed.
+   * Writes `files` (repo-relative path → text) into the worktree at `worktree`, `git rm`s each of
+   * `removals` whose blob there is still `blob_sha` (absent or changed ones are left alone) and commits
+   * with `message`. Resolves the new commit, or undefined when nothing changed and nothing was committed.
    */
-  commitInWorktree(worktree: string, files: Readonly<Record<string, string>>, removals: readonly string[], message: string): Promise<string | undefined>;
+  commitInWorktree(worktree: string, files: Readonly<Record<string, string>>, removals: ReadonlyArray<{ path: string; blob_sha: string }>, message: string): Promise<string | undefined>;
   /** Moves a staging clone to `name`, replacing an orphaned clone or worktree directory of that name. */
   promote(staging: string, name: string): Promise<void>;
   /** Deletes the clone `name` and its worktrees directory; absent ones are fine. */

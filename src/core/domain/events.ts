@@ -34,7 +34,8 @@ function fromAgent<T extends string>(type: T) {
 export const eventSchema = z.discriminatedUnion('type', [
   // Draft and approval. `draft_ready` names the Intake Stage that wrote the draft; a contract file
   // imported complete has no Stage and no `stage_id` (AD-5).
-  z.strictObject({ type: z.literal('draft_ready'), stage_id: stageId.optional(), usage }),
+  // `reply` is Owner text that reached the draft while that Intake Stage ran; it derives a `draft_reply`.
+  z.strictObject({ type: z.literal('draft_ready'), stage_id: stageId.optional(), usage, reply: z.string().min(1).optional() }),
   /** The Owner's reply to the Draft card; it joins the Intake brief. */
   z.strictObject({ type: z.literal('draft_reply'), text: z.string().min(1) }),
   /** `main` at approval becomes `config_sha`; feasibility is checked against its Recipe's Evidence kinds (CAP-4). */

@@ -213,18 +213,32 @@ describe('GitRepo (temporary local remote, AD-24)', () => {
     await repo.ensureClone(remote.dir, 'training');
     const worktree = await repo.addTaskWorktree('training', 3, 'dark-mode', sha);
     const files = { '.antipod/tasks/3.yaml': 'task: 3\n' };
-    const commit = await repo.commitInWorktree(worktree, files, ['.antipod/inbox/a.yaml'], 'antipod: contract v1');
+    const inbox = [{ path: '.antipod/inbox/a.yaml', blob_sha: git(remote.dir, 'rev-parse', 'main:.antipod/inbox/a.yaml') }];
+    const commit = await repo.commitInWorktree(worktree, files, inbox, 'antipod: contract v1');
     expect(commit).toBe(git(worktree, 'rev-parse', 'HEAD'));
     expect(git(worktree, 'log', '-1', '--format=%s %an')).toBe('antipod: contract v1 Antipode');
     expect(git(worktree, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n')).toEqual(['.antipod/tasks/3.yaml', 'antipod.yaml']);
-    expect(await repo.commitInWorktree(worktree, files, ['.antipod/inbox/a.yaml'], 'antipod: contract v1')).toBeUndefined();
+    expect(await repo.commitInWorktree(worktree, files, inbox, 'antipod: contract v1')).toBeUndefined();
     expect(git(worktree, 'rev-list', '--count', 'HEAD')).toBe('2');
     await expect(repo.commitInWorktree(worktree, { '../escape.yaml': 'x' }, [], 'm')).rejects.toThrow(/outside the worktree/);
     // Something already staged in the worktree stays out of the contract commit.
     writeFileSync(join(worktree, 'stray.txt'), 'stray\n');
     git(worktree, 'add', 'stray.txt');
-    await repo.commitInWorktree(worktree, { '.antipod/tasks/3.yaml': 'task: 3\nversion: 2\n' }, ['.antipod/inbox/a.yaml'], 'antipod: contract v2');
+    await repo.commitInWorktree(worktree, { '.antipod/tasks/3.yaml': 'task: 3\nversion: 2\n' }, inbox, 'antipod: contract v2');
     expect(git(worktree, 'show', '--name-only', '--format=', 'HEAD')).toBe('.antipod/tasks/3.yaml');
     expect(git(worktree, 'diff', '--cached', '--name-only')).toBe('stray.txt');
+  });
+
+  it('commitInWorktree keeps an inbox file whose blob is not the imported one', async () => {
+    const { repo } = setup();
+    const remote = createTempRemote();
+    remote.commit({ 'antipod.yaml': validRecipe(), '.antipod/inbox/a.yaml': 'goal: g\n' });
+    const imported = git(remote.dir, 'rev-parse', 'main:.antipod/inbox/a.yaml');
+    const sha = remote.commit({ '.antipod/inbox/a.yaml': 'goal: newer\n' });
+    await repo.ensureClone(remote.dir, 'training');
+    const worktree = await repo.addTaskWorktree('training', 3, 'dark-mode', sha);
+    await repo.commitInWorktree(worktree, { '.antipod/tasks/3.yaml': 'task: 3\n' }, [{ path: '.antipod/inbox/a.yaml', blob_sha: imported }], 'antipod: contract v1');
+    expect(git(worktree, 'show', '--name-only', '--format=', 'HEAD')).toBe('.antipod/tasks/3.yaml');
+    expect(git(worktree, 'show', 'HEAD:.antipod/inbox/a.yaml')).toBe('goal: newer');
   });
 });

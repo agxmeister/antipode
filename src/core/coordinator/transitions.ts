@@ -212,8 +212,12 @@ type RuleTable = { [S in TaskState]?: { [E in EventType]?: Rule<E> } };
 const TABLE: RuleTable = {
   draft: {
     // From the Intake Stage that wrote the draft (it succeeded), or from a complete contract file with no Stage.
-    draft_ready: (task, stage, event, ctx) =>
-      enter('awaiting_approval', task, stage, ctx, { cause: event.type, ...(event.stage_id === undefined ? {} : { stageUpdate: SUCCEEDED }) }),
+    draft_ready: (task, stage, event, ctx) => {
+      const ready = enter('awaiting_approval', task, stage, ctx, { cause: event.type, ...(event.stage_id === undefined ? {} : { stageUpdate: SUCCEEDED }) });
+      // A reply that arrived during the run revises the draft at once (`awaiting_approval --> draft`).
+      if (event.reply !== undefined) ready.derived.push({ type: 'draft_reply', text: event.reply });
+      return ready;
+    },
   },
   awaiting_approval: {
     draft_reply: go('draft'),
