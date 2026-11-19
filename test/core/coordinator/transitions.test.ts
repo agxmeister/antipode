@@ -509,14 +509,20 @@ describe('drafts (AD-3, AD-9, CAP-8, CAP-9)', () => {
     expect(outcome.effects).toEqual([]);
   });
 
-  it('stage_retries_exhausted in draft cancels the draft with the intake-failed notice, never stuck', () => {
+  it('stage_retries_exhausted in draft cancels a first run with the intake-failed notice, never stuck', () => {
     const outcome = applied(transition(draft(), stage('draft', { status: 'failed', attempt: 3 }), { type: 'stage_retries_exhausted', reason: 'intake failed 3 times' }, ctx()));
     expect(outcome.next).toBe('cancelled');
     expect(outcome.patch.stuck_reason).toBeNull();
-    expect(outcome.effects).toEqual([
-      { kind: 'notify', notice_kind: INTAKE_FAILED, task_id: 'task-1', payload: { reason: 'intake failed 3 times' } },
-      { kind: 'notify', notice_kind: DRAFT_CARD, task_id: 'task-1', payload: { closed: 'cancelled' } },
-    ]);
+    expect(outcome.effects).toEqual([{ kind: 'notify', notice_kind: INTAKE_FAILED, task_id: 'task-1', payload: { reason: 'intake failed 3 times' } }]);
+  });
+
+  it('stage_retries_exhausted in draft returns a revision to awaiting_approval with the notice and no card edit', () => {
+    const outcome = applied(
+      transition(draft(), stage('draft', { status: 'failed', attempt: 3 }), { type: 'stage_retries_exhausted', reason: 'intake failed 3 times' }, ctx({ hasContract: () => true })),
+    );
+    expect(outcome.next).toBe('awaiting_approval');
+    expect(outcome.patch).toMatchObject({ current_stage_id: null, stuck_reason: null });
+    expect(outcome.effects).toEqual([{ kind: 'notify', notice_kind: INTAKE_FAILED, task_id: 'task-1', payload: { reason: 'intake failed 3 times' } }]);
   });
 
   it('approved numbers the Task, pins config_sha, and queues prepare_branch and the card edit', () => {

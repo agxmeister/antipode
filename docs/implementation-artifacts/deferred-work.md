@@ -54,6 +54,3 @@
 - source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
   summary: Make a failed `commit_contract` or `prepare_branch` block the Implementer `start_stage` and reach the Owner as an outbox notice, not only a `failed` effect row.
   evidence: `EffectExecutor.#runOne` marks a throwing effect `failed` and drains the next row, so the Implementer can start without the Branch projection and the Owner sees `⏳ Queued` with nothing following (review pass 1, #8).
-- source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
-  summary: When Intake exhausts its retries on a revision (a `draft_reply`), return the draft to `awaiting_approval` on its previous version, mark the Owner's reply `❌` with `Couldn't process that — send it again.`, and keep cancelling only a first run.
-  evidence: Owner decided this in the story 1-8 walkthrough (2026-11-18). Blocked on `bmad-correct-course`: the spine AD-3 generic rule sends `stage_retries_exhausted` to `stuck` and draws no `draft --> awaiting_approval` arrow for it. Today the transition cancels, and the closed card keeps `· draft` with no state line (review pass 1, #11).

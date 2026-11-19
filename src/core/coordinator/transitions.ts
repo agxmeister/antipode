@@ -21,6 +21,8 @@ export interface TransitionContext {
    * when it may be applied (CAP-8, CAP-9). Absent means nothing refuses.
    */
   approvalRefusal?(event: EventOf<'approved'>): string | undefined;
+  /** Whether the draft has a contract version, i.e. its Intake run was a revision (AD-3). Absent means no. */
+  hasContract?(): boolean;
 }
 
 /** The Draft card, rendered from the rows; sent once, then edited in place. Payload `{refusal?, closed?}`. */
@@ -318,9 +320,18 @@ function generic(task: Task, stage: Stage | undefined, event: Event, ctx: Transi
       if (!LIVE_STAGE_STATUSES.includes(stage.status) && stage.status !== 'failed') return { ignored: 'invalid' };
       const reason = event.reason ?? `${stage.role} Stage exhausted its retries`;
       if (task.state === 'draft') {
-        // Intake gave up: the draft is cancelled and the Owner's message gets `❌` and a reply (AD-10).
+        // Intake gave up (AD-3): a revision returns to its card on the previous version, which still shows
+        // it, so the card is not re-rendered; a first run has no card and is cancelled. Either way the
+        // Owner's latest message gets `❌` and a reply (AD-10).
+        const failed: Effect = { kind: 'notify', notice_kind: INTAKE_FAILED, task_id: task.id, payload: { reason } };
+        if (ctx.hasContract?.() === true) {
+          const back = enter('awaiting_approval', task, stage, ctx, { cause: event.type });
+          back.effects = back.effects.filter((effect) => !(effect.kind === 'notify' && effect.notice_kind === DRAFT_CARD));
+          back.effects.push(failed);
+          return back;
+        }
         const cancelled = enter('cancelled', task, stage, ctx, { cause: event.type });
-        cancelled.effects.push({ kind: 'notify', notice_kind: INTAKE_FAILED, task_id: task.id, payload: { reason } }, draftCard(task.id, { closed: 'cancelled' }));
+        cancelled.effects.push(failed);
         return cancelled;
       }
       return enter('stuck', task, stage, ctx, { cause: event.type, patch: { stuck_reason: reason } });

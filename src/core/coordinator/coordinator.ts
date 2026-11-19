@@ -399,6 +399,7 @@ export class Coordinator {
       limits: policy.limits,
       nextTaskNo: () => this.#store.nextTaskNo(task.project_id),
       approvalRefusal: (event) => approvalRefusal(this.#store, task, event.evidence_kinds),
+      hasContract: () => this.#store.latestContract(task.id) !== undefined,
     };
   }
 

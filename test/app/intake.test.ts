@@ -278,18 +278,30 @@ describe('Intake drafts from Owner text (CAP-7, CAP-8, CAP-9)', () => {
     expect(h.cardSends()).toHaveLength(1);
   });
 
-  it('a draft_reply naming another draft is unhandled: the Stage fails unhandled_output on every attempt', async () => {
+  it('a revision whose Intake fails every attempt returns to its card on the previous version, ❌ on the reply', async () => {
     const h = await harness([output(newDraft())]);
     const task = await textToDraftCard(h);
+    // A draft_reply naming another draft is unhandled until targeting exists (1-14), so every attempt fails.
     setFakeRuns(h.fake, [output(newDraft()), output({ kind: 'draft_reply', draft_id: 'some-other-draft', answers: ['x'], changes: '' })]);
     h.push((id) => textUpdate(id, 'yes', { messageId: 53, replyTo: cardMessageId(h) }));
-    await vi.waitFor(() => expect(h.daemon.store.getTask(task.id)?.state).toBe('cancelled'), { timeout: 15_000 });
+    await vi.waitFor(() => expect(h.daemon.store.stagesOfTask(task.id)).toHaveLength(4), { timeout: 15_000 });
+    await vi.waitFor(() => expect(h.daemon.store.getTask(task.id)?.state).toBe('awaiting_approval'));
     const reruns = h.daemon.store.stagesOfTask(task.id).slice(1);
     expect(reruns.map((stage) => [stage.status, stage.reason])).toEqual([
       ['failed', UNHANDLED_OUTPUT],
       ['failed', UNHANDLED_OUTPUT],
       ['failed', UNHANDLED_OUTPUT],
     ]);
+    expect(h.daemon.store.latestContract(task.id)?.version).toBe(1);
+    await vi.waitFor(() => expect(h.tg.callsOf('sendMessage').filter((call) => call['text'] === INTAKE_FAILED_REPLY)).toHaveLength(1));
+    expect(h.tg.callsOf('sendMessage').find((call) => call['text'] === INTAKE_FAILED_REPLY)).toMatchObject({ reply_parameters: { message_id: 53 } });
+    const reactions = h.tg.callsOf('setMessageReaction').filter((call) => call['message_id'] === 53).map((call) => (call['reaction'] as Array<{ emoji: string }>)[0]!.emoji);
+    expect(reactions).toEqual(['👀', '❌']);
+    // The card still shows version 1 with its buttons; it is neither edited nor reposted, and they work again.
+    expect(h.edits()).toEqual([]);
+    expect(h.cardSends()).toHaveLength(1);
+    h.tap('Approve');
+    await vi.waitFor(() => expect(h.daemon.store.getTask(task.id)?.state).toBe('queued'));
   });
 
   it('not_actionable on a revision returns the draft to its card, unchanged and not cancelled', async () => {
