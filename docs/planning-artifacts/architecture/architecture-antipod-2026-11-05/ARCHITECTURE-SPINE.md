@@ -102,7 +102,7 @@ Arrows mean "may import". Nothing in `core/` imports from `adapters/` or `app/`.
 - **Rule:**
   - All events — scheduler ticks, Telegram commands, Stage results, step results, timeouts, SIGHUP — enter one in-process serial queue. `applyEvent(state, event)` is synchronous and runs in one SQLite transaction that writes the new Task state, the `stage_events` row and one `effects` row per effect. No adapter is called inside the transaction. An effect executor drains `effects` in insertion order after commit and marks each `done` or `failed`; effects are idempotent by `effect_id`. An effect that starts a Stage inserts the `stages` row with `status = starting` inside the transition, before any process exists.
   - Every Stage and step event carries `stage_id`. It is applied only if `stage_id = tasks.current_stage_id` and that row is `starting` or `running`; otherwise it is appended as `ignored(stale)` and does nothing. A Stage the Coordinator ends (pause, cancel, amendment, timeout) has its row set to `cancelled(<reason>)` before the signal is sent.
-  - Generic events. `ACTIVE` = `queued, waiting_on_dependencies, implementing, testing, validating, triage, evidencing, verifying, in_review, integrating, stuck, paused`. `cancel → cancelled` from every non-terminal state (current Stage cancelled; Branch kept). `pause → paused` from `ACTIVE` minus `paused`, storing `tasks.resume_state` (current Stage cancelled); `resume → resume_state` with cause `resume`. `amended → implementing` from `ACTIVE` (criteria changed and confirmed; `budget_used = 0`). `stage_retries_exhausted → stuck` from any state whose current Stage is running. `deps_unsatisfiable → stuck` from `waiting_on_dependencies`. For these two direct entries to `stuck` the Coordinator writes `tasks.stuck_reason` itself; every other entry goes through Triage.
+  - Generic events. `ACTIVE` = `queued, waiting_on_dependencies, implementing, testing, validating, triage, evidencing, verifying, in_review, integrating, stuck, paused`. `cancel → cancelled` from every non-terminal state (current Stage cancelled; Branch kept). `pause → paused` from `ACTIVE` minus `paused`, storing `tasks.resume_state` (current Stage cancelled); `resume → resume_state` with cause `resume`. `amended → implementing` from `ACTIVE` (criteria changed and confirmed; `budget_used = 0`). `stage_retries_exhausted → stuck` from any state whose current Stage is running, except `draft`. In `draft` (Intake gave up after `intake.retries`), it goes to `awaiting_approval` on the previous contract version when the draft already has one (a revision). It goes to `cancelled` when the draft has none (the first run). Either way the Owner's latest message of the draft gets `❌` and a reply (AD-10). `deps_unsatisfiable → stuck` from `waiting_on_dependencies`. For these two direct entries to `stuck` the Coordinator writes `tasks.stuck_reason` itself; every other entry goes through Triage.
   - Undo windows: `accepted` and `discarded` store `tasks.undo_expires_at = now + limits.undo_accept_ms | limits.undo_discard_ms` (defaults 10 s, 60 s); the scheduler tick emits `undo_expired` when it has passed, and `undone` is accepted only before it. No Integration effect hangs off `accepted`.
   - Project pause: `/pause` with no Task sets `projects.paused_at`; the scheduler treats every Task of that Project as paused by the Owner.
   - Iteration Budget: `budget_used` increments only when `implementing` is entered with cause `scheduler_start` (first lap), `blocking_findings`, `rerun`, `evidence_missing`, `test_failed` or `rebase_or_revalidation_failed`. `correction`, `resume`, `retry`, `restart` and `amended` never count. `budget_spent` fires when `budget_used >= budget_limit`; `budget_raised(n)` adds `n` to `budget_limit`.
@@ -118,6 +118,8 @@ stateDiagram-v2
   awaiting_approval --> discard_pending: discarded
   discard_pending --> awaiting_approval: undone
   discard_pending --> cancelled: undo_expired
+  draft --> awaiting_approval: stage_retries_exhausted [revision]
+  draft --> cancelled: stage_retries_exhausted [first run]
   queued --> waiting_on_dependencies: deps_unmerged
   waiting_on_dependencies --> queued: deps_merged
   queued --> implementing: scheduler_start
@@ -151,7 +153,7 @@ stateDiagram-v2
   cancelled --> [*]
 ```
 
-The generic events (`cancel`, `pause`/`resume`, `amended`, `stage_retries_exhausted`, `deps_unsatisfiable`) are listed in the Rule and not drawn. `testing` is the Coordinator-run Recipe `test` step (a Recipe without a `test` step passes it at once); `verifying` is the Validator Stage in Evidence mode; both appear in `/status` as "validating".
+The generic events (`cancel`, `pause`/`resume`, `amended`, `stage_retries_exhausted`, `deps_unsatisfiable`) are listed in the Rule and not drawn, except the two `draft` exits of `stage_retries_exhausted`. `testing` is the Coordinator-run Recipe `test` step (a Recipe without a `test` step passes it at once); `verifying` is the Validator Stage in Evidence mode; both appear in `/status` as "validating".
 
 ### AD-4 — A Stage is exactly one `claude -p` subprocess with typed output and a fixed retry policy [ADOPTED]
 
