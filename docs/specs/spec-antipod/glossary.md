@@ -28,7 +28,7 @@ Fixed vocabulary for every Antipode artifact. Capitalized terms in SPEC.md, the 
 
 ## Roles and execution
 
-- **Role** — a kind of agent work with its own Role Config. MVP Roles: **Intake** (drafts contracts, interprets every Owner Message), **Implementer** (changes code on the Branch), **Validator** (checks the Branch against every criterion; in Evidence mode checks each artifact shows its criterion), **Evidence Producer** (creates Evidence), **Triage** (reruns or parks non-blocking findings, writes the Stuck reason).
+- **Role** — a kind of agent work with its own Role Config. MVP Roles: **Intake** (drafts contracts, interprets every Owner Message), **Implementer** (changes code on the Branch), **Validator** (checks the Branch against every criterion; in Evidence mode checks each artifact shows its criterion), **Evidence Producer** (creates Evidence), **Triage** (reruns or parks non-blocking findings, decides on a blocked Implementer, writes the Stuck reason).
 - **Role Config** — a directory with instructions, MCP config, permissions and `role.yaml` (timeout, retries, max turns, output schema). Resolved package → `$ANTIPOD_HOME/roles/` → `.antipod/roles/` in the repo.
 - **Stage** — one run of one Role on one Task: one fresh `claude -p` subprocess with typed JSON output. Stages read anything in the repo and write only their own worktree.
 - **Step** — one Recipe step run, invoked by the Coordinator or by a Stage through `antipod step <name>`.

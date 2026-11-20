@@ -54,7 +54,7 @@
   title: Implement, validate and triage loop
   description: >-
     Implementer, Validator and Triage Stages routed by outcome under one Iteration Budget, Branch push and Recipe test
-    after every Implementer run, and the Stuck card (CAP-13, CAP-19, CAP-20).
+    after every finished Implementer run, and the Stuck card (CAP-13, CAP-19, CAP-20).
   spec_checkpoint: true
 - id: "10"
   title: Evidence production, ingest and rendering

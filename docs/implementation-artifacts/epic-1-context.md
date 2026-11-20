@@ -103,7 +103,7 @@ Build the whole Antipode MVP loop end to end on the Owner's Mac. A single daemon
   - Each Project has a bare clone, a read-only `_main` checkout, and one worktree per Task on `antipod/<task_no>-<slug>`.
   - Each Project is fetched at boot and every `git.fetch_interval_ms`. The inbox is scanned after each fetch, keyed by `(path, blob_sha)`.
   - The Recipe, Role Config, inbox and secret names are read only from `main` at `tasks.config_sha`.
-  - The Branch is pushed after every Implementer Stage, and then the Recipe `test` step runs.
+  - The Branch is pushed after every Implementer Stage that reports `done`, and then the Recipe `test` step runs. A blocked Implementer goes to Triage.
   - Antipode writes `main` only by fast-forward during Integration.
 - **The contract rows are the record.** Stage briefs are rendered from the `contracts` and `criteria` rows. On first entering `implementing`, the Coordinator writes `.antipod/tasks/<task_no>.yaml` and commits it as `antipod: contract v<version>`; the first such commit also removes the inbox file with `git rm`. The budget is stored on `tasks`, not in the file.
 - **Evidence** is immutable and linked to a criterion. Only the Evidence Producer writes it, and a repeated attempt marks the earlier rows `superseded`. `ANTIPOD_PRIOR` holds the previous round's files for before/after pairs. Composites and callouts come only from the `antipod-evidence` renderer (sharp, bundled Inter, DESIGN.md tokens).

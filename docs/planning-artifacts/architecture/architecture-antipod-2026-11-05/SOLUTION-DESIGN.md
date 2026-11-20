@@ -70,7 +70,7 @@ Podman's macOS VM has no nested virtualization, so the Android emulator and the 
 
 Exclusive capabilities (one Unity editor) are a lock in the scheduler, not a convention. The scheduler's gate order puts it last so that a Task blocked only on the editor is reported as such.
 
-"CI on every push" is resolved as: the Recipe's `test` step, run by the Runner after every Implementer Stage, is the CI. Hosted CI can exist but is not awaited. The reason is practical: Unity and Android tests need the host or a big image, and a one-Owner factory gains little from a second runner it has to wait on. This resolves the PRD's open question 1 and is tagged as an assumption so the Owner can overrule it.
+"CI on every push" is resolved as: the Recipe's `test` step, run by the Runner after every Implementer Stage that reports `done`, is the CI. Hosted CI can exist but is not awaited. The reason is practical: Unity and Android tests need the host or a big image, and a one-Owner factory gains little from a second runner it has to wait on. This resolves the PRD's open question 1 and is tagged as an assumption so the Owner can overrule it.
 
 ## 5. Git
 

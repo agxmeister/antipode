@@ -75,7 +75,7 @@ A pain and an opportunity. The Owner (agxmeister) has personal software projects
 
 - **CAP-13** Validation routing and Iteration Budget (FR-13)
   - **intent:** The Coordinator routes each validated Task by outcome, and one Iteration Budget bounds every Implementer run whatever caused it.
-  - **success:** Blocking findings return the Task to the Implementer; non-blocking findings go to Triage, which reruns or parks them; a pass goes to evidencing. Implementer runs caused by findings, Triage, failed tests, missing or rejected Evidence or Integration rework each use one budget unit; Corrections, retries, resumes and amendments never do. A spent budget produces a Stuck card with Triage's one-line reason, up to three attempts and the last Evidence. Triage always runs in a fresh session.
+  - **success:** Blocking findings return the Task to the Implementer; non-blocking findings and a blocked Implementer go to Triage, which reruns, parks or writes the Stuck reason; a pass goes to evidencing. Implementer runs caused by findings, Triage, failed tests, missing or rejected Evidence or Integration rework each use one budget unit; Corrections, retries, resumes and amendments never do. A spent budget produces a Stuck card with Triage's one-line reason, up to three attempts and the last Evidence. Triage always runs in a fresh session.
 
 - **CAP-14** Owner controls (FR-14)
   - **intent:** The Owner can pause, resume or cancel any Task or Project at any time and edit any Task's contract.
@@ -103,7 +103,7 @@ A pain and an opportunity. The Owner (agxmeister) has personal software projects
 
 - **CAP-20** Branch per Task, shared read visibility (FR-20)
   - **intent:** Each Task works on its own Branch and worktree; every Stage can read `main` and other Branches but writes only its own.
-  - **success:** No two agents edit the same tree; shipped Role permissions deny writes to other worktrees, `.antipod/` and `$ANTIPOD_HOME`; after every Implementer Stage the Branch is pushed and the Recipe `test` step runs.
+  - **success:** No two agents edit the same tree; shipped Role permissions deny writes to other worktrees, `.antipod/` and `$ANTIPOD_HOME`; after every Implementer Stage that reports `done` the Branch is pushed and the Recipe `test` step runs.
 
 - **CAP-21** Evidence per criterion (FR-21)
   - **intent:** The Evidence Producer creates Evidence for every criterion, each artifact linked to its criterion.
