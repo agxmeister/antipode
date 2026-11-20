@@ -44,7 +44,7 @@ development_status:
   1-6-step-runners: done
   1-7-claude-cli-agentrunner-and-role-configs: done
   1-8-intake-drafts-from-text-and-the-inbox: done
-  1-9-implement-validate-and-triage-loop: backlog
+  1-9-implement-validate-and-triage-loop: ready-for-dev
   1-10-evidence-production-ingest-and-rendering: backlog
   1-11-review-sequence-accept-and-correction: backlog
   1-12-integration-and-release: backlog

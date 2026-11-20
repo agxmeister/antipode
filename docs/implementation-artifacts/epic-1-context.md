@@ -4,7 +4,7 @@
 
 ## Goal
 
-Build the whole Antipode MVP loop end to end on the Owner's Mac. One daemon registers a Project from a Telegram group and turns Owner requests and repo-inbox files into approved Task Contracts. A deterministic, persisted Coordinator runs each Stage as a `claude -p` subprocess, the Stages produce criterion-linked Evidence, and the Owner judges a Review on the phone, then Accepts (Integration and Release follow) or corrects. This is cut-line step 1, which must ship even if Android, voice, Unity and OpenSCAD are cut; later epics only add Project types and voice on top of it.
+Build the whole Antipode MVP loop end to end on the Owner's Mac. A single daemon registers a Project from a Telegram group and turns Owner requests and repo-inbox files into approved Task Contracts. A deterministic, persisted Coordinator runs each Stage as a `claude -p` subprocess. Stages produce Evidence linked to each criterion, and the Owner judges the Review on a phone, then either Accepts (Integration and Release follow) or asks for changes. This is cut-line step 1 and must ship even if Android, voice, Unity and OpenSCAD are cut. Later epics only add Project types and voice on top of it.
 
 ## Stories
 
@@ -28,51 +28,145 @@ Build the whole Antipode MVP loop end to end on the Owner's Mac. One daemon regi
 
 ## Requirements & Constraints
 
-- Telegram is the only Owner surface: long polling, no public URL, only the configured Owner user id is honoured. Every Owner action is acknowledged within 5 s (`👀` reaction or toast).
-- The Coordinator is deterministic, has no LLM, and is the only thing that changes Task state. LLM judgment enters only as typed Stage output. Free text that changes criteria, budget or cancellation acts only after `Confirm` on an Interpretation card. Button taps never go through Intake.
-- Task state, Stage history, Evidence and the Parking Lot survive a daemon kill or reboot. An interrupted Stage is retried, never counted as a failure; Mac sleep pauses work without failing it.
-- A Stage fails on timeout, crash, invalid output or `max_turns`; it is retried up to the Role limit without using Iteration Budget, then the Task goes Stuck. No agent session runs while a Task waits for the Owner.
-- One Iteration Budget per Task (default 5) counts Implementer runs; Corrections, retries, restarts, resumes and amendments never count. `Raise budget +2` adds 2.
-- Concurrency 1–3 (default 2); starts held at 3 open Reviews across all Projects; dependencies must be merged to `main`; new Stages held at 85% Usage Window, running ones never killed.
-- A Contract cannot be approved while any criterion's Required Evidence is outside the Recipe's `evidence_kinds`. A new inbox file on `main` yields exactly one Draft; an already imported or merged contract is never offered again. Drafts ask at most two questions.
-- The Validator runs in its own session and checks the Branch and every Evidence artifact; nothing passes on the Implementer's word. Video ≤ 60 s, artifacts ≤ 50 MB (larger goes back to the Implementer); a Demo over 50 MB is reported `file too large, not sent`.
-- Isolation: a Stage writes only its own worktree and gets no secret values; `PROD_` secrets reach only `release`; a Recipe with a value-looking secret fails validation; no production data anywhere.
-- One bootstrap Task per Project (one criterion per Evidence kind) gates feature Tasks and is never merged or released; its failure blocks onboarding until a new `/register`.
-- All limits, timeouts and retries are configuration (`docs/specs/spec-antipod/config-defaults.md`), e.g. `limits.undo_discard_ms` 60 s, `intake.retries` 2, `intake.context_messages` 10.
+- **Telegram only.** Telegram is the only Owner surface. The bot uses long polling with no public URL and honours only the configured Owner user id. Every Owner action is acknowledged within 5 s, by a `👀` reaction or a toast.
+- **Deterministic Coordinator.** The Coordinator has no LLM and is the only component that changes Task state. LLM judgment arrives only as typed Stage output. Free text that changes criteria, budget or cancellation takes effect only after `Confirm` on an Interpretation card. Button taps never pass through Intake.
+- **Durability.** Task state, Stage history, Evidence and the Parking Lot survive a daemon kill or a reboot. A Stage interrupted by a restart is retried and never counted as a failure. Mac sleep pauses work without failing it.
+- **Stage failure.** A Stage fails on timeout, crash, invalid output or `max_turns`. It is retried up to the Role's limit without using Iteration Budget, and then the Task goes Stuck. No agent session runs while a Task waits for the Owner.
+- **Iteration Budget.** Each Task has one budget, default 5, that counts Implementer runs. These causes count one unit each: first start, blocking findings, Triage rerun, test failed, Evidence missing or rejected, and Integration rework. Corrections, retries, restarts, resumes and amendments never count. A confirmed amendment restarts the Task with a fresh budget. `Raise budget +2` adds 2 runs.
+- **Starting Tasks.**
+  - Concurrency is 1–3 Tasks, default 2.
+  - Starts are held while 3 Reviews are open across all Projects.
+  - A Task starts only after its dependencies are merged to `main`.
+  - New Stages are held when the Usage Window reaches 85%. Running Stages are never killed for the window.
+- **Contracts.**
+  - A Contract cannot be approved while any criterion's Required Evidence is outside the Recipe's `evidence_kinds`.
+  - A new inbox file on `main` yields exactly one Draft. A contract already imported or merged is never offered again.
+  - A Draft asks at most two questions.
+  - When Intake gives up in `draft`, a revision returns to `awaiting_approval` on its previous version and a first run is cancelled. Either way the Owner's latest message gets `❌` and a reply. A draft never goes to `stuck`.
+- **Validation and Evidence.**
+  - The Validator runs in its own session and checks the Branch and every Evidence artifact. Nothing passes on the Implementer's word.
+  - Videos are at most 60 s and artifacts at most 50 MB. A larger artifact sends the Task back to the Implementer.
+  - A Demo over 50 MB is reported as `file too large, not sent`.
+- **Isolation.**
+  - A Stage writes only to its own worktree and receives no secret values.
+  - `PROD_` secrets reach only the `release` step, and a Recipe containing a value-looking secret fails validation.
+  - No production data is used anywhere.
+- **Bootstrap.** Each Project gets one bootstrap Task with one criterion per Evidence kind, and it gates feature Tasks. The bootstrap is never merged or released. If it fails, onboarding stays blocked until a new `/register`.
+- **Configuration.** All limits, timeouts and retries are configuration, never code. Defaults are in `docs/specs/spec-antipod/config-defaults.md`.
 
 ## Technical Decisions
 
-- **Hexagonal core.** `src/core/` (domain, coordinator, ports) imports only Node built-ins and `zod`. Ports: `AgentRunner`, `StepRunner`, `Repo`, `Messenger`, `Store`, `EvidenceStore`, `WindowReader`, `Transcriber`, `Clock`. Adapters never import each other; `src/app/` composes.
-- **SQLite is the system of record** (including `step_runs` and `capability_leases`). A `data/` file exists only when a row references it. Migrations are forward-only at boot; a newer database is refused.
-- **Commit first, act second.** One serial event queue; synchronous `applyEvent` writes state, `stage_events` and `effects` in one transaction; effects run after commit, idempotent by `effect_id`. A Stage/step event whose `stage_id` is not `tasks.current_stage_id` is recorded `ignored(stale)`. The spine fixes the state diagram (draft → awaiting_approval → queued/discard_pending, … → released/cancelled), the generic events and the budget-counting causes; `transitions.ts` has a table-driven test over every `(state, event)`.
-- **Identity.** ULIDs internally; the per-Project Task number (`#12`) is assigned at approval or bootstrap creation. `AC<n>` is fixed per criterion and never reused (a dropped one keeps its id, `status = dropped`). `tasks.review_round` increments once per Review delivered; Evidence is stored under `review_round + 1`.
-- **Scheduler gates, in order:** Owner pause, usage window, concurrency, Review backpressure, dependencies merged, bootstrap accepted (skipped for the bootstrap), exclusive-capability hint (reason `capability`). Gates read only the database; the failing one is `tasks.waiting_reason`. The usage gate is rechecked before every Stage launch.
-- **Stages.** Each is one `claude -p` with `cwd` = the Task worktree, or the read-only `_main` checkout for Intake (no Branch). `stream-json` goes to `data/stages/<stage_id>.jsonl`; `--json-schema` comes from the Role's zod schema. Permissions are the Role's `permissions.json` (a Claude Code settings file with `permissions.allow`/`deny`) passed with `--settings`; `--setting-sources` stops user, project and local settings loading; `--strict-mcp-config` limits MCP servers to the Role's `mcp.json`; `--permission-mode`, `--append-system-prompt-file`, `--max-turns` come from the resolved Role Config. No other flag set. Shipped permissions deny writes under `.antipod/` and `$ANTIPOD_HOME`, reads under `$ANTIPOD_HOME` and other worktrees, and direct build/test tools (steps go only through `antipod step`). Timeout: SIGINT, SIGTERM 30 s later, monotonic deadlines. Outputs: Implementer `done|blocked`, Validator `pass|blocking|nonblocking` (+ `evidence_verdicts`), Triage `rerun|park|stuck`, Evidence Producer `artifacts[]`, Intake `OwnerInstruction`.
-- **Intake is the one interpreter.** Started only by `owner_message`, `promote_finding`, or `inbox_detected` for a file lacking per-criterion Evidence. Output `OwnerInstruction { instructions: [1..2], question? }`, each one of `new_draft | draft_reply | correction | amendment | cancel | not_actionable`, at most one per kind. `draft_reply`, `correction`, `not_actionable` apply directly; `amendment`/`cancel` (with any accompanying `new_draft`) apply after one Interpretation-card Confirm; a lone `new_draft` becomes a Draft card. The brief is rendered from rows plus the last `intake.context_messages` Owner/bot messages and any unanswered question. Quick-answer taps update the draft row without a Stage.
-- **Role Config and settings** resolve file by file: package `roles/` → `$ANTIPOD_HOME/roles/` → repo `.antipod/roles/` (later wins); settings from `config.yaml` → `antipod.yaml` → Task Contract.
-- **Git.** Bare clone per Project, read-only `_main` checkout (fast-forwarded before use), one worktree per Task on `antipod/<task_no>-<slug>`. Inbox files are `.antipod/inbox/<slug>.yaml` (contract) or `.md` (BMad story) on `main`, detected after each fetch (at boot and every `git.fetch_interval_ms`) by `(path, blob_sha)` in `contract_sources`; a new `blob_sha` at a path whose Task is terminal is a new draft; `.antipod/tasks/` is never scanned. Approval assigns `task_no` and creates Branch and worktree but commits nothing. Recipe, `.antipod/roles/`, inbox and secret names are read only from `main` at `tasks.config_sha`. The Branch is pushed after every Implementer Stage, then Recipe `test` runs. Antipode writes `main` only by fast-forward in Integration.
-- **Contract rows are the record.** `contracts` (versioned) and `criteria` rows; an inbox file is input only until import. The Coordinator alone writes `.antipod/tasks/<task_no>.yaml` from rows as the first effect on entering `implementing` and commits it as `antipod: contract v<version>`, the first such commit also `git rm`s the source inbox file. Briefs come from rows, never the file; budget lives on `tasks`.
-- **Evidence** is immutable and criterion-linked, written only by the Evidence Producer; a repeat marks earlier rows `superseded`. Composites and callouts come only from the `antipod-evidence` renderer (sharp, Inter, DESIGN.md tokens).
-- **Telegram.** Persisted `update_id`; every send/edit is an `outbox` row drained per chat in order, one Review sequence at a time. `callback_data` is `cb:<ulid>` bound to Task state and `review_round`. HTML parse mode, one template module per card kind, truncation in the template; `setMyCommands` at boot.
-- **Integration.** After the 10 s Undo: rebase on `origin/main`, re-test, re-validate, fast-forward, push, then `release` if declared. Rebase or revalidation failure costs one budget unit; `main` is never rolled back.
-- **Usage and cost** go only through `core/coordinator/usage.ts`; `WindowReader` returns `null` on failure and the estimator takes over.
-- **Crash-only recovery.** At boot: fail `starting`/`running` Stages with `restart` and apply retry policy; re-run only `pending` effects; resend unsent outbox; fail `running` step runs, kill leased processes, remove step containers, clear leases; delete orphan Evidence files. A clock jump over 60 s extends deadlines and queues one silent `back_online` per Project.
-- **Ops and tests.** Never use `~/.antipod`. pino JSON logs with `project_id`, `task_id`, `stage_id`. Core tests use in-memory port fakes; adapter tests use a fake `claude` on PATH, a grammY transformer, a temporary git remote, Podman with busybox and file-backed SQLite. A failure the Owner must see becomes an `outbox` notice.
+- **Hexagonal core.**
+  - `src/core/` (domain, coordinator, ports) imports only Node built-ins and `zod`.
+  - The ports are `AgentRunner`, `StepRunner`, `Repo`, `Messenger`, `Store`, `EvidenceStore`, `WindowReader`, `Transcriber` and `Clock`.
+  - Adapters never import each other. `src/app/` wires everything together.
+- **SQLite is the system of record**, including `step_runs` and `capability_leases`. A file under `data/` exists to the system only when a row references it; Progress Peek is the one exception. Migrations are forward-only and run at boot. The daemon refuses a database newer than the code.
+- **Commit first, act second.**
+  - All events go through one serial queue.
+  - A synchronous `applyEvent` writes the state, the `stage_events` row and the `effects` rows in one transaction.
+  - Effects run after commit and are idempotent by `effect_id`.
+  - A Stage or step event whose `stage_id` is not `tasks.current_stage_id` is recorded as `ignored(stale)`.
+  - The spine fixes the state diagram, the generic events and the causes that count against the budget, including the two `draft` exits of `stage_retries_exhausted`. `transitions.ts` keeps a table-driven test over every `(state, event)` pair.
+- **Identity.**
+  - Internal ids are ULIDs.
+  - The per-Project Task number (`#12`) is assigned at approval or at bootstrap creation.
+  - `AC<n>` is fixed per criterion and never reused. A dropped criterion keeps its id and gets `status = dropped`.
+  - `tasks.review_round` increments once per Review delivered, and Evidence is stored under `review_round + 1`.
+- **Scheduler gates**, checked in this order:
+  1. Owner pause
+  2. Usage window
+  3. Concurrency
+  4. Review backpressure
+  5. Dependencies merged
+  6. Bootstrap accepted (skipped for the bootstrap itself)
+  7. Exclusive-capability hint (reason `capability`)
+
+  Gates read only the database, and the failing gate is stored as `tasks.waiting_reason`. The usage gate is checked again before every Stage launch.
+- **Stages.**
+  - Each Stage is one `claude -p` process. Its `cwd` is the Task worktree, or the read-only `_main` checkout for Intake, which has no Branch.
+  - `stream-json` output goes to `data/stages/<stage_id>.jsonl`, and `--json-schema` comes from the Role's zod schema.
+  - Permissions come only from the Role's `permissions.json`, passed with `--settings`; `--setting-sources` blocks every other settings file. MCP servers come only from the Role's `mcp.json`, through `--strict-mcp-config`.
+  - On timeout the process gets SIGINT, then SIGTERM 30 s later. Deadlines use monotonic time.
+  - Output discriminators:
+    - Implementer: `done|blocked`
+    - Validator: `pass|blocking|nonblocking`, with `evidence_verdicts` in Evidence mode
+    - Triage: `rerun|park|stuck`
+    - Evidence Producer: `artifacts[]`
+    - Intake: `OwnerInstruction`
+- **Recipe steps** run only through `antipod step <name>`, which reaches the daemon over a Unix socket. The Container and Host Runners share one step contract (`ANTIPOD_OUT`, `ANTIPOD_DATA`, `ANTIPOD_PRIOR`, `ANTIPOD_TASK`, only the secrets the step names). Each run is a `step_runs` row. A busy exclusive capability fails fast with `capability_busy`, which leads to a retry, never to a budget unit.
+- **Intake is the only interpreter.**
+  - Intake starts only on `owner_message`, `promote_finding`, or `inbox_detected` for a file without Evidence per criterion.
+  - It returns 1–2 instructions plus an optional question. The instruction kinds are `new_draft`, `draft_reply`, `correction`, `amendment`, `cancel` and `not_actionable`.
+  - `draft_reply`, `correction` and `not_actionable` apply directly. `amendment` and `cancel`, with any `new_draft` that accompanies them, apply after one Confirm.
+  - A quick-answer tap updates the draft row without running a Stage.
+- **Git.**
+  - Each Project has a bare clone, a read-only `_main` checkout, and one worktree per Task on `antipod/<task_no>-<slug>`.
+  - Each Project is fetched at boot and every `git.fetch_interval_ms`. The inbox is scanned after each fetch, keyed by `(path, blob_sha)`.
+  - The Recipe, Role Config, inbox and secret names are read only from `main` at `tasks.config_sha`.
+  - The Branch is pushed after every Implementer Stage, and then the Recipe `test` step runs.
+  - Antipode writes `main` only by fast-forward during Integration.
+- **The contract rows are the record.** Stage briefs are rendered from the `contracts` and `criteria` rows. On first entering `implementing`, the Coordinator writes `.antipod/tasks/<task_no>.yaml` and commits it as `antipod: contract v<version>`; the first such commit also removes the inbox file with `git rm`. The budget is stored on `tasks`, not in the file.
+- **Evidence** is immutable and linked to a criterion. Only the Evidence Producer writes it, and a repeated attempt marks the earlier rows `superseded`. `ANTIPOD_PRIOR` holds the previous round's files for before/after pairs. Composites and callouts come only from the `antipod-evidence` renderer (sharp, bundled Inter, DESIGN.md tokens).
+- **Telegram.**
+  - The last `update_id` is persisted.
+  - Every send or edit is an `outbox` row, drained per chat in order, with one Review sequence at a time.
+  - `callback_data` is `cb:<ulid>`, bound to the Task state and `review_round`.
+  - Messages use HTML parse mode, with one template module per card kind; truncation happens in the template.
+- **Integration.** After the 10 s Undo, Integration rebases on `origin/main`, runs the test step again, revalidates, fast-forwards, pushes, and then runs `release` if the Recipe declares it. A rebase or revalidation failure costs one budget unit. `main` is never rolled back.
+- **Usage and cost** go only through `core/coordinator/usage.ts`. When `WindowReader` returns `null`, the estimator takes over.
+- **Crash-only recovery.** At boot the Coordinator:
+  - fails `starting` and `running` Stages with `restart` and applies the retry policy;
+  - replays only `pending` effects;
+  - resends unsent outbox rows;
+  - fails running step runs, kills leased processes and clears leases;
+  - deletes orphan Evidence files.
+
+  A clock jump over 60 s extends deadlines and queues one silent `back_online` notice per Project.
+- **Tests.** Core tests use in-memory fakes of the ports. Adapter tests use a fake `claude` on PATH, a grammY transformer, a temporary git remote, Podman with busybox, and file-backed SQLite. Tests never use `~/.antipod`, the Owner's Claude login or the real bot token.
 
 ## UX & Interaction Patterns
 
-- **Tone.** One private supergroup per Project. Status-report copy: no apologies, greetings or exclamation marks; a glyph is always followed by a word; approximate durations, local times. Stages and Roles appear only in `/log` and Peek.
-- **Draft card.** Title `<b>${task-title}</b> · draft` (no Task number before approval; `#n · title` once approved). Goal, numbered criteria with their Evidence kind, fits one phone screen; up to 2 questions with quick-answer buttons when closed. `Approve` is hidden until every question is answered and every criterion feasible, replaced by `Approve after: answer Q1`. An infeasible criterion reads `AC3 ⚠️ can't evidence … · proposed: …` with `Use proposal` / `Drop AC3`. A text or voice reply revises the draft and the card is edited in place. `Discard` needs no confirmation; the card reads `Discarded · undo within 1 min` with one `Undo` button, then `Discarded` with no buttons. Approve toasts `Queued.` and the card shows `⏳ Queued · …`.
-- **Review order.** One silent Evidence message per criterion (visual first, before/after after a Correction, Degraded marked `⚠️` with reason), then the silent Demo, then the Review card (the only message with sound): summary, criteria strip, Parking Lot, cost line, `Accept` / `Request changes`.
-- **Accept and stale taps.** Cards edit in place; `Undo` shows 10 s after Accept and restores the same card; a tap on an old card gets `This Review was replaced by a newer one.`
-- **Sound** only for the Review card, Stuck, Release failed, Onboarding blocked and Registration failed.
-- **Targeting.** Reply to a bot message, explicit id, single matching Task, then candidate buttons; untargeted text goes to Intake. A Correction uses force-reply; note-only goes straight back to the Implementer, criteria changes need an Interpretation card. Stuck offers `Raise budget +2` / `Cancel Task`.
-- **Commands:** `/register`, `/status`, `/peek`, `/parked`, `/cost`, `/pause`, `/resume`, `/cancel`, `/evidence`, `/log`. Exact copy is in EXPERIENCE.md, visual tokens in DESIGN.md.
+- **Tone.**
+  - Each Project has one private supergroup.
+  - Copy reads like a status report, with no apologies, greetings or exclamation marks.
+  - A glyph is always followed by a word.
+  - Durations are approximate and times are local.
+  - Stages and Roles are named only in `/log` and in a Peek.
+- **Draft card.**
+  - The title is `<b>${title}</b> · draft` with no number; after approval it is `#n · title`.
+  - Up to 2 questions, with quick-answer buttons when the answer is closed. `Approve` stays hidden until everything is answered and feasible.
+  - An infeasible criterion shows `⚠️` with `Use proposal` / `Drop ACn`.
+  - A reply revises the draft, and the card is edited in place.
+  - After Discard the card reads `Discarded · undo within 1 min` with an `Undo` button; when the minute is up it reads `Discarded`.
+- **Review.** The Review is sent in this order, and only the card makes a sound:
+  1. One silent Evidence message per criterion. Visuals come first, a before/after pair follows a Correction, and Degraded Evidence is marked with `⚠️` and its reason.
+  2. The silent Demo.
+  3. The Review card, with a summary, a criteria strip, the Parking Lot, a cost line, and `Accept` / `Request changes`.
+- **After a tap.**
+  - Cards are edited in place.
+  - `Accept` shows `Undo` for 10 s.
+  - A tap on an outdated card gets `This Review was replaced by a newer one.`
+  - `Request changes` opens a force-reply. A Correction that only adds a note goes straight back to the Implementer, and a change to criteria needs an Interpretation card.
+  - The Stuck card offers `Raise budget +2` / `Cancel Task`, and `Cancel Task` asks for confirmation in place.
+- **Sound** comes only from the Review card, Stuck, Release failed, Onboarding blocked and Registration failed.
+- **Targeting.** A Task is resolved from the replied-to message, then an explicit id, then a single matching Task, then candidate buttons.
+- **Commands:** `/register`, `/status`, `/peek`, `/parked`, `/cost`, `/pause`, `/resume`, `/cancel`, `/evidence`, `/log`. The exact copy is in EXPERIENCE.md, and the visual tokens are in DESIGN.md.
 
 ## Cross-Story Dependencies
 
-- 1.1 underpins everything; 1.2 is the base for every Coordinator story; 1.3 builds on 1.2.
-- Adapter stories 1.4–1.7 mostly run in parallel after 1.2; every flow story uses them.
-- 1.8 needs 1.4, 1.5 and 1.7. 1.9 needs 1.6 and 1.7. 1.10 needs 1.6 and 1.9. 1.11 needs 1.4 and 1.10. 1.12 needs 1.11, 1.5 and 1.6. 1.13 needs the full loop. 1.9, 1.10 and 1.12 read step outcomes from `step_runs`.
-- 1.14 extends Intake (1.8) with corrections, amendments, cancels and Interpretation cards; 1.15 builds on Evidence and Stage records; 1.16 on the usage gate (1.3) and Stage results (1.7); 1.17 on Triage parking (1.9) and drafts (1.8).
-- Later epics: epic 2 (Android) reuses Recipe, Runners and bootstrap; epic 3 adds a `Transcriber` in front of Intake; epic 4 adds Recipes and Role Config MCPs.
+- **Done.** Stories 1.1–1.8 are done. They provide the scaffold, the Coordinator, the gates, the Telegram, git and claude-cli adapters, the step runners, and Intake drafting. The remaining stories build on these and do not redo them.
+- **Story 1.9** needs 1.6 and 1.7.
+- **Story 1.10** needs 1.6 and 1.9.
+- **Story 1.11** needs 1.4 and 1.10.
+- **Story 1.12** needs 1.11, 1.5 and 1.6.
+- **Story 1.13** needs the full loop.
+- **Stories 1.9, 1.10 and 1.12** read step outcomes from `step_runs`.
+- **Story 1.14** extends Intake (1.8) with corrections, amendments, cancels and Interpretation cards.
+- **Story 1.15** builds on the Evidence and Stage records.
+- **Story 1.16** builds on the usage gate (1.3) and the Stage results (1.7).
+- **Story 1.17** builds on Triage parking (1.9) and drafts (1.8).
+- **Stories 1.14 and 1.17** inherit the draft rules: no number before approval, and the Intake give-up behaviour.
+- **Later epics.**
+  - Epic 2 (Android) reuses the Recipe, the Runners and the bootstrap.
+  - Epic 3 puts a `Transcriber` in front of Intake.
+  - Epic 4 adds Recipes and MCPs in Role Config.
