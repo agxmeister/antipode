@@ -11,6 +11,8 @@ import {
   type CardEnv,
 } from '../../../src/adapters/telegram/cards/card.ts';
 import { deliveryFailedCard } from '../../../src/adapters/telegram/cards/delivery-failed.ts';
+import { renderStuckCard, STUCK_CARD, STUCK_FOOTER } from '../../../src/adapters/telegram/cards/stuck-card.ts';
+import { taskSchema, type Task } from '../../../src/core/domain/task.ts';
 import { usageWindowResumedCard } from '../../../src/adapters/telegram/cards/usage-window-resumed.ts';
 import { usageWindowWaitCard } from '../../../src/adapters/telegram/cards/usage-window-wait.ts';
 import { ULID_PATTERN } from '../../../src/core/domain/ids.ts';
@@ -106,5 +108,58 @@ describe('notice templates', () => {
     const long = text(deliveryFailedCard.render({ task_no: 12, review: true, reason: 'r'.repeat(10_000) }, e));
     expect(visibleLength(long)).toBe(TEXT_LIMIT);
     expect(long.endsWith('…')).toBe(true);
+  });
+});
+
+describe('Stuck card (DESIGN stuck-card)', () => {
+  const NOW = '2026-11-08T12:00:00.000Z';
+
+  function stuckTask(e: ReturnType<typeof env>): Task {
+    e.store.insertProject({ id: 'p1', name: 'training', paused_at: null, telegram_chat_id: -1, repo_url: null, exclusive_capabilities: [], created_at: NOW });
+    const task = taskSchema.parse({
+      id: 't1', project_id: 'p1', kind: 'feature', task_no: 12, state: 'stuck', current_stage_id: null, budget_used: 3, budget_limit: 3, review_round: 0,
+      resume_state: null, stuck_reason: 'stored reason', waiting_reason: null, undo_expires_at: null, config_sha: null, title: 'Rest <timer>', slug: 'rest-timer', created_at: NOW, updated_at: NOW,
+    });
+    e.store.insertTask(task);
+    for (const [i, summary] of ['first try', 'second try', 'third try', 'fourth try'].entries()) {
+      const id = `s${i}`;
+      e.store.insertStage({ id, task_id: 't1', role: 'implementer', attempt: 1, status: 'succeeded', reason: null, created_at: NOW, started_at: NOW, ended_at: NOW });
+      e.store.setStageOutput(id, { status: 'done', summary });
+    }
+    return task;
+  }
+
+  function notice(task: Task, payload: Record<string, unknown>) {
+    return { effect: { kind: 'notify' as const, notice_kind: STUCK_CARD, task_id: task.id, payload }, task, replyTo: undefined };
+  }
+
+  it('renders title, reason, the last three laps, the buttons and the footer', () => {
+    const e = env();
+    const task = stuckTask(e);
+    const [draft] = renderStuckCard(notice(task, { reason: 'AC2 & AC3 conflict' }), e);
+    expect(draft!.kind).toBe('stuck_card');
+    expect(draft!.payload.params['text']).toBe(
+      ['🧱 <b>#12 · Rest &lt;timer&gt;</b> · Stuck', 'AC2 &amp; AC3 conflict', '', 'Lap 2: second try', 'Lap 3: third try', 'Lap 4: fourth try', '', STUCK_FOOTER].join('\n'),
+    );
+    const markup = draft!.payload.params['reply_markup'] as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+    expect(markup.inline_keyboard.map((row) => row.map((b) => b.text))).toEqual([['Raise budget +2', 'Cancel Task']]);
+    const raise = e.store.getCallback(markup.inline_keyboard[0]![0]!.callback_data.slice(3));
+    expect(raise).toMatchObject({ command: 'raise_budget', task_id: 't1', round: null, args: { amount: 2 } });
+  });
+
+  it('edits the sent card: confirm swaps the buttons, closed replaces buttons and footer with a state line; nothing without a sent card', () => {
+    const e = env();
+    const task = stuckTask(e);
+    expect(renderStuckCard(notice(task, { mode: 'confirm' }), e)).toEqual([]);
+    const [sent] = e.store.enqueueOutbox(-1, renderStuckCard(notice(task, { reason: 'why' }), e), null, NOW);
+    const [confirm] = renderStuckCard(notice(task, { mode: 'confirm' }), e);
+    expect(confirm).toMatchObject({ kind: 'stuck_card', target_outbox_id: sent!.id, payload: { method: 'editMessageText', params: { text: sent!.payload.params['text'] } } });
+    const buttons = (confirm!.payload.params['reply_markup'] as { inline_keyboard: Array<Array<{ text: string }>> }).inline_keyboard;
+    expect(buttons.map((row) => row.map((b) => b.text))).toEqual([['Confirm cancel #12', 'Keep']]);
+    const [raised] = renderStuckCard(notice(task, { closed: 'raised', amount: 2 }), e);
+    expect(raised!.payload.params['text']).toBe(['🧱 <b>#12 · Rest &lt;timer&gt;</b> · Stuck', 'why', '', 'Lap 2: second try', 'Lap 3: third try', 'Lap 4: fourth try', '', '⏳ Budget +2 · resuming'].join('\n'));
+    expect(raised!.payload.params['reply_markup']).toEqual({ inline_keyboard: [] });
+    const [cancelled] = renderStuckCard(notice(task, { closed: 'cancelled' }), e);
+    expect(String(cancelled!.payload.params['text']).endsWith('Lap 4: fourth try\n\nCancelled')).toBe(true);
   });
 });

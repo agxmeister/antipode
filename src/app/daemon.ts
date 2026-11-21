@@ -17,6 +17,7 @@ import { recover } from '../core/coordinator/recovery.ts';
 import { Scheduler } from '../core/coordinator/scheduler.ts';
 import { AntipodError } from '../core/domain/errors.ts';
 import type { Clock } from '../core/ports/clock.ts';
+import type { StepRunner } from '../core/ports/step-runner.ts';
 import type { WindowReader } from '../core/ports/window-reader.ts';
 import { systemClock } from './clock.ts';
 import { loadConfig, type Config } from './config.ts';
@@ -29,6 +30,8 @@ import { SOCKET_FILE, startStepSocket, type StepSocket } from './step-socket.ts'
 import { Intake } from './intake.ts';
 import { INTAKE_ROLE, Stages } from './stages.ts';
 import { recoverSteps, Steps } from './steps.ts';
+import { stuckCallbacks } from './stuck.ts';
+import { TestStep } from './test-step.ts';
 
 export type StopSignal = 'SIGTERM' | 'SIGINT';
 
@@ -58,6 +61,8 @@ export interface Daemon {
   readonly steps: Steps;
   /** Launches and cancels Stages (AD-4); the `start_stage` and `cancel_stage` handlers. */
   readonly stages: Stages;
+  /** The Coordinator-run `testing` Stage: push, then the Recipe `test` step (AD-13); the `run_test_step` handler. */
+  readonly testStep: TestStep;
   /** Drafts from Owner text and the inbox, the Draft card's commands and the Branch effects (CAP-6..9). */
   readonly intake: Intake;
   config(): Config;
@@ -85,6 +90,8 @@ export interface BootOptions {
   claude?: string;
   /** SIGINT-to-SIGTERM grace of a stopped Stage; 30 s by default (AD-4). Tests shorten it. */
   stageKillGraceMs?: number;
+  /** The container step Runner instead of Podman; tests pass a fake (Podman has its own adapter test, AD-24). */
+  containerRunner?: StepRunner;
 }
 
 /** No reading: the usage gate stays open (AD-12 fallback arrives with the estimator). */
@@ -126,6 +133,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   let registration: Registration;
   let steps: Steps;
   let stages: Stages;
+  let testStep: TestStep;
   let intake: Intake;
   let stepSocket: StepSocket | undefined;
   /** `/register` jobs in flight; `stop()` waits for them before the database closes. */
@@ -206,6 +214,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       // Untargeted Owner text and replies to a Draft card go to Intake; its buttons are Coordinator commands (AD-9).
       telegram.onText((input) => draftIntake.onText(input));
       for (const [command, definition] of draftIntake.callbacks()) telegram.registerCallback(command, definition);
+      for (const [command, definition] of stuckCallbacks(coordinator)) telegram.registerCallback(command, definition);
       executor.register('notify', (effect, row) => telegram.notify(effect, row));
       executor.register('back_online', (effect, row) => telegram.backOnline(effect, row));
       executor.register('retire_card', (effect, row) => telegram.retireCard(effect, row));
@@ -240,7 +249,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       clock,
       log: logger,
     });
-    steps = new Steps({ store, repo: gitRepo, dataDir: paths.data, secretsDir: paths.secrets, runners: { container: podman, host }, clock, log: logger });
+    steps = new Steps({ store, repo: gitRepo, dataDir: paths.data, secretsDir: paths.secrets, runners: { container: options.containerRunner ?? podman, host }, clock, log: logger });
     // Stages (AD-4, AD-6, AD-15): `antipod` on every Stage's PATH, Role Config layered package ← home ← repo.
     writeAntipodShim(paths);
     stages = new Stages({
@@ -259,12 +268,19 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       secretsDir: paths.secrets,
       runBin: paths.runBin,
       config: () => ({ roles: config.roles, agent: config.agent, intake: config.intake }),
+      clock,
       baseEnv: options.env ?? process.env,
       log: logger,
     });
     stages.setOutputHook(INTAKE_ROLE, draftIntake.outputHook);
     executor.register('start_stage', (effect) => stages.startStage(effect));
-    executor.register('cancel_stage', (effect) => stages.cancelStage(effect));
+    testStep = new TestStep({ store, coordinator, repo: gitRepo, steps, log: logger });
+    const tests = testStep;
+    executor.register('run_test_step', (effect) => tests.run(effect));
+    executor.register('cancel_stage', (effect) => {
+      stages.cancelStage(effect);
+      tests.cancel(effect);
+    });
     // Steps first (AD-18): leased processes and step containers are gone before anything relaunches.
     const stepRecovery = await recoverSteps({
       store,
@@ -344,6 +360,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     registration,
     steps,
     stages,
+    testStep,
     intake,
     tick: onTick,
     config: () => config,
@@ -374,6 +391,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
         await scheduler.idle();
         // Running Stages are stopped and apply nothing; boot recovery fails them `restart` (AD-18).
         await stages.stop();
+        await testStep.stop();
         // Let queued transactions and the drain in flight finish before the database closes; nothing new
         // starts, and pending effects replay at next boot (AD-18).
         await coordinator.idle();

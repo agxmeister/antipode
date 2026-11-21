@@ -111,6 +111,8 @@ describe('daemon', () => {
       ['start_stage', 'done'],
       ['start_stage', 'done'],
       ['start_stage', 'done'],
+      // Every entry to stuck tells the Owner (CAP-13); without Telegram the notice is logged.
+      ['notify', 'done'],
     ]);
     expect(daemon.store.stagesOfTask(task.id).map((stage) => [stage.status, stage.reason])).toEqual([
       ['failed', 'launch'],
@@ -119,6 +121,7 @@ describe('daemon', () => {
     ]);
     expect(daemon.executor.has('start_stage')).toBe(true);
     expect(daemon.executor.has('cancel_stage')).toBe(true);
+    expect(daemon.executor.has('run_test_step')).toBe(true);
     expect(daemon.executor.has('back_online')).toBe(true);
     await daemon.stop('test');
     expect(logOf(home).find((line) => line['event'] === 'stage_launch_failed')).toMatchObject({ level: 50, reason: 'launch', task_id: task.id });

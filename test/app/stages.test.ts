@@ -8,7 +8,7 @@ import { GitRepo } from '../../src/adapters/git/repo.ts';
 import { systemClock } from '../../src/app/clock.ts';
 import { bootDaemon, type BootOptions, type Daemon } from '../../src/app/daemon.ts';
 import { ensureHome, PACKAGE_ROLES } from '../../src/app/home.ts';
-import { eventForOutput, LAUNCH, Stages, UNHANDLED_OUTPUT } from '../../src/app/stages.ts';
+import { eventForOutput, LAUNCH, renderLoopBrief, Stages, UNHANDLED_OUTPUT, type LoopBrief } from '../../src/app/stages.ts';
 import { Coordinator } from '../../src/core/coordinator/coordinator.ts';
 import { taskSchema } from '../../src/core/domain/task.ts';
 import { createTempRemote } from '../helpers/git.ts';
@@ -62,6 +62,19 @@ async function harness(runs: FakeRun[], config: Record<string, unknown> = {}, op
   };
 }
 
+/** Output no event maps: an Implementer whose home role.yaml asks for `EvidenceOutput` (AD-15 layering). */
+const UNMAPPED = { artifacts: [] };
+function unmappedImplementer(home: TempHome): void {
+  const dir = join(home.root, 'roles', 'implementer');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'role.yaml'), 'output_schema: evidence\npermission_mode: dontAsk\n');
+}
+
+/** Resolves once the first Implementer Stage has ended (the test step after it fails without a clone). */
+async function implementerEnded(daemon: Daemon, task: Task): Promise<void> {
+  await vi.waitFor(() => expect(implementerStages(daemon, task)[0]?.status).toBe('succeeded'));
+}
+
 function stateOf(daemon: Daemon, task: Task): string | undefined {
   return daemon.store.getTask(task.id)?.state;
 }
@@ -82,12 +95,13 @@ describe('Stages through the daemon (fake claude, AD-24)', () => {
     const { daemon, home, queuedTask } = await harness([{ structured_output: DONE }]);
     const task = await queuedTask();
     await daemon.tick();
-    await vi.waitFor(() => expect(stateOf(daemon, task)).toBe('testing'));
+    await implementerEnded(daemon, task);
     const [stage] = daemon.store.stagesOfTask(task.id);
-    expect(stage).toMatchObject({ role: 'implementer', attempt: 1, status: 'succeeded', retries: 2 });
+    expect(stage).toMatchObject({ role: 'implementer', attempt: 1, status: 'succeeded', retries: 2, output: DONE });
     expect(stage?.started_at).not.toBeNull();
     const events = appliedEvents(daemon, task);
-    expect(events.map((event) => event.type)).toEqual(['bootstrap_created', 'scheduler_start', 'stage_started', 'implementer_done']);
+    expect(events.slice(0, 4).map((event) => event.type)).toEqual(['bootstrap_created', 'scheduler_start', 'stage_started', 'implementer_done']);
+    expect(daemon.store.stageEventsOfTask(task.id)[3]).toMatchObject({ from_state: 'implementing', to_state: 'testing' });
     expect(events[3]?.payload).toEqual({ type: 'implementer_done', stage_id: stage?.id, usage: USAGE });
     const transcript = join(home.root, 'data', 'stages', `${stage?.id}.jsonl`);
     expect(readFileSync(transcript, 'utf8')).toContain('"type":"result"');
@@ -98,7 +112,7 @@ describe('Stages through the daemon (fake claude, AD-24)', () => {
     const { daemon, home, fake, queuedTask } = await harness([{ structured_output: DONE }]);
     const task = await queuedTask();
     await daemon.tick();
-    await vi.waitFor(() => expect(stateOf(daemon, task)).toBe('testing'));
+    await implementerEnded(daemon, task);
     const [call] = fakeCalls(fake);
     const [stage] = daemon.store.stagesOfTask(task.id);
     const role = join(home.root, 'data', 'stages', stage!.id, 'role');
@@ -140,7 +154,7 @@ describe('Stages through the daemon (fake claude, AD-24)', () => {
     writeFileSync(join(home.root, 'secrets', 'antipod.env'), `SOME_API_TOKEN=${SECRET}\nANTHROPIC_API_KEY=sk-test\n`, { mode: 0o600 });
     const task = await queuedTask();
     await daemon.tick();
-    await vi.waitFor(() => expect(stateOf(daemon, task)).toBe('testing'));
+    await implementerEnded(daemon, task);
     const [call] = fakeCalls(fake);
     expect(call?.argv.at(-1)).toBe('--bare');
     expect(call?.env['ANTHROPIC_API_KEY']).toBe('sk-test');
@@ -180,7 +194,7 @@ describe('Stages through the daemon (fake claude, AD-24)', () => {
     const { daemon, queuedTask } = await harness([{ structured_output: { status: 'finished' } }, { subtype: 'error_max_turns', exit: 1 }, { structured_output: DONE }]);
     const task = await queuedTask();
     await daemon.tick();
-    await vi.waitFor(() => expect(stateOf(daemon, task)).toBe('testing'));
+    await vi.waitFor(() => expect(implementerStages(daemon, task)[2]?.status).toBe('succeeded'));
     expect(implementerStages(daemon, task).map((stage) => [stage.status, stage.reason])).toEqual([
       ['failed', 'invalid_output'],
       ['failed', 'max_turns'],
@@ -197,7 +211,7 @@ describe('Stages through the daemon (fake claude, AD-24)', () => {
     );
     const task = await queuedTask();
     await daemon.tick();
-    await vi.waitFor(() => expect(stateOf(daemon, task)).toBe('testing'), { timeout: 10_000 });
+    await vi.waitFor(() => expect(implementerStages(daemon, task)[1]?.status).toBe('succeeded'), { timeout: 10_000 });
     expect(implementerStages(daemon, task).map((stage) => [stage.status, stage.reason])).toEqual([
       ['failed', 'timeout'],
       ['succeeded', null],
@@ -233,16 +247,20 @@ describe('Stages through the daemon (fake claude, AD-24)', () => {
     expect(daemon.store.effectsOfTask(task.id).every((row) => row.status === 'done')).toBe(true);
   });
 
-  it('unmapped output: a valid Implementer blocked with no hook fails unhandled_output, retried, then stuck', async () => {
-    const { daemon, queuedTask } = await harness([{ structured_output: { status: 'blocked', summary: 'need a key' } }]);
+  it('unmapped output: valid output no event maps and no hook takes fails unhandled_output, retried, then stuck', async () => {
+    const { daemon, home, queuedTask } = await harness([{ structured_output: UNMAPPED }]);
+    unmappedImplementer(home);
     const task = await queuedTask();
     await daemon.tick();
     await vi.waitFor(() => expect(stateOf(daemon, task)).toBe('stuck'));
     expect(daemon.store.stagesOfTask(task.id).map((stage) => stage.reason)).toEqual([UNHANDLED_OUTPUT, UNHANDLED_OUTPUT, UNHANDLED_OUTPUT]);
+    // Output that maps to no applied event is not stored.
+    expect(daemon.store.stagesOfTask(task.id).every((stage) => stage.output === undefined)).toBe(true);
   });
 
   it('an output hook of the Role maps output that has no fixed event', async () => {
-    const { daemon, queuedTask } = await harness([{ structured_output: { status: 'blocked', summary: 'need a key' } }]);
+    const { daemon, home, queuedTask } = await harness([{ structured_output: UNMAPPED }]);
+    unmappedImplementer(home);
     const seen: unknown[] = [];
     daemon.stages.setOutputHook('implementer', ({ stage, output, usage }) => {
       seen.push(output);
@@ -250,8 +268,26 @@ describe('Stages through the daemon (fake claude, AD-24)', () => {
     });
     const task = await queuedTask();
     await daemon.tick();
-    await vi.waitFor(() => expect(stateOf(daemon, task)).toBe('testing'));
-    expect(seen).toEqual([{ status: 'blocked', summary: 'need a key' }]);
+    await implementerEnded(daemon, task);
+    expect(daemon.store.stageEventsOfTask(task.id).find((row) => row.event_type === 'implementer_done')).toMatchObject({ status: 'applied', to_state: 'testing' });
+    expect(seen).toEqual([UNMAPPED]);
+  });
+
+  it('a blocked Implementer is implementer_blocked: Triage starts with the blocker in its brief and no push or test', async () => {
+    const { daemon, fake, queuedTask } = await harness([{ structured_output: { status: 'blocked', summary: 'need the API key for the sandbox' } }, { structured_output: { decision: 'stuck', reason: 'needs the key' }, sleepMs: 200 }]);
+    const task = await queuedTask();
+    await daemon.tick();
+    await vi.waitFor(() => expect(stateOf(daemon, task)).toBe('stuck'));
+    expect(daemon.store.stagesOfTask(task.id).map((stage) => [stage.role, stage.status])).toEqual([
+      ['implementer', 'succeeded'],
+      ['triage', 'succeeded'],
+    ]);
+    expect(daemon.store.stageEventsOfTask(task.id).find((row) => row.event_type === 'implementer_blocked')).toMatchObject({ from_state: 'implementing', to_state: 'triage' });
+    const brief = fakeCalls(fake)[1]!.stdin;
+    expect(brief).toContain('### The Implementer is blocked');
+    expect(brief).toContain('need the API key for the sandbox');
+    expect(daemon.store.getTask(task.id)).toMatchObject({ stuck_reason: 'needs the key', budget_used: 1 });
+    expect(daemon.store.effectsOfTask(task.id).some((row) => row.kind === 'run_test_step')).toBe(false);
   });
 
   it('unknown Role: start_stage with a role no layer defines fails launch with the reason logged', async () => {
@@ -312,7 +348,7 @@ describe('Stages through the daemon (fake claude, AD-24)', () => {
     mkdirSync(join(home.root, 'data', 'worktrees', 'training', '_main'), { recursive: true });
     const task = await queuedTask();
     await daemon.tick();
-    await vi.waitFor(() => expect(stateOf(daemon, task)).toBe('testing'));
+    await implementerEnded(daemon, task);
     const [stage] = daemon.store.stagesOfTask(task.id);
     const settings = JSON.parse(readFileSync(join(home.root, 'data', 'stages', stage!.id, 'role', 'permissions.json'), 'utf8')) as { permissions: { deny: string[]; allow: string[] } };
     const own = realpathSync(join(home.root, 'data', 'worktrees', 'training', String(task.task_no)));
@@ -368,7 +404,8 @@ describe('Stages through the daemon (fake claude, AD-24)', () => {
   });
 
   it('an output hook that throws fails the Stage unhandled_output with its usage', async () => {
-    const { daemon, queuedTask } = await harness([{ structured_output: { status: 'blocked', summary: 'need a key' } }]);
+    const { daemon, home, queuedTask } = await harness([{ structured_output: UNMAPPED }]);
+    unmappedImplementer(home);
     daemon.stages.setOutputHook('implementer', () => {
       throw new Error('hook broke');
     });
@@ -462,15 +499,62 @@ describe('eventForOutput (AD-4 discriminators, Owner decision 2026-11-15)', () =
     // No verdict at all verifies nothing.
     expect(eventForOutput('validator', 'verifying', { verdict: 'pass', findings: [], evidence_verdicts: [] }, 's', usage)?.type).toBe('evidence_rejected');
     expect(eventForOutput('validator', 'verifying', { verdict: 'pass', findings: [] }, 's', usage)?.type).toBe('evidence_rejected');
-    expect(eventForOutput('triage', 'triage', { decision: 'rerun', reason: 'r' }, 's', usage)?.type).toBe('rerun');
-    expect(eventForOutput('triage', 'triage', { decision: 'park', reason: 'r' }, 's', usage)?.type).toBe('parked');
+    expect(eventForOutput('triage', 'triage', { decision: 'rerun', reason: 'r' }, 's', usage)).toEqual({ type: 'rerun', stage_id: 's', reason: 'r', usage });
+    expect(eventForOutput('triage', 'triage', { decision: 'park', reason: 'r' }, 's', usage)).toEqual({ type: 'parked', stage_id: 's', reason: 'r', usage });
     expect(eventForOutput('triage', 'triage', { decision: 'stuck', reason: 'needs the Owner' }, 's', usage)).toEqual({ type: 'reason_written', stage_id: 's', reason: 'needs the Owner', usage });
     expect(eventForOutput('implementer', 'implementing', { status: 'done', summary: 'x' }, 's', usage)?.type).toBe('implementer_done');
   });
 
-  it('leaves Implementer blocked, EvidenceOutput and OwnerInstruction to output hooks', () => {
-    expect(eventForOutput('implementer', 'implementing', { status: 'blocked', summary: 'x' }, 's', usage)).toBeUndefined();
+  it('maps Implementer blocked to implementer_blocked; leaves EvidenceOutput and OwnerInstruction to output hooks', () => {
+    expect(eventForOutput('implementer', 'implementing', { status: 'blocked', summary: 'x' }, 's', usage)).toEqual({ type: 'implementer_blocked', stage_id: 's', usage });
     expect(eventForOutput('evidence', 'evidencing', { artifacts: [] }, 's', usage)).toBeUndefined();
     expect(eventForOutput('owner-instruction', 'draft', { instructions: [] }, 's', usage)).toBeUndefined();
+  });
+});
+
+describe('renderLoopBrief (AD-21, CAP-19)', () => {
+  const base: LoopBrief = {
+    role: 'implementer',
+    title: 'Rest timer',
+    goal: 'Add a rest timer.',
+    branch: 'antipod/4-rest-timer',
+    criteria: [{ task_id: 't', ac_no: 1, text: 'timer starts', required_evidence: 'screencast', infeasible_wanted: null, infeasible_proposal: null, status: 'active' }],
+    laps: [{ n: 1, status: 'done', summary: 'added it' }],
+    parked: [{ id: 'x', task_id: 't', p_no: 1, criterion_id: 'AC1', note: 'the beep is quiet', status: 'open', source_stage_id: null, created_at: '2026-11-20T12:00:00.000Z' }],
+    budget: { used: 2, limit: 3 },
+    budgetSpent: false,
+    lastLap: { implementer: { status: 'done', summary: 'added it' }, blocking: [], nonblocking: [], triageReason: 'try a timer service' },
+  };
+
+  it('the Implementer reads the goal, criteria, Triage reason and the parked findings to leave alone', () => {
+    const brief = renderLoopBrief(base);
+    expect(brief).toContain('Goal: Add a rest timer.');
+    expect(brief).toContain('- AC1 [screencast]: timer starts');
+    expect(brief).toContain("Triage's reason: try a timer service");
+    expect(brief).toContain('do not work on them');
+    expect(brief).toContain('- P1 AC1: the beep is quiet');
+  });
+
+  it('the Validator never reads a lap summary; Triage reads laps and the budget', () => {
+    expect(renderLoopBrief({ ...base, role: 'validator' })).not.toContain('added it');
+    const triage = renderLoopBrief({ ...base, role: 'triage', budgetSpent: true });
+    expect(triage).toContain('- Lap 1 (done): added it');
+    expect(triage).toContain('Iteration Budget: 2/3 used.');
+    expect(triage).toContain('The Iteration Budget is spent');
+  });
+
+  it('Triage sees the blocking findings and the failed test; the Implementer after a blocked lap sees the blocker', () => {
+    const lastLap = {
+      implementer: { status: 'blocked' as const, summary: 'need the sandbox key' },
+      blocking: [{ criterion_id: 'AC1', blocking: true, note: 'never starts' }],
+      nonblocking: [],
+      testFailure: { step_run_id: 'r', outcome: 'exited', exit_code: 1, log_tail: 'FAILED TimerTest' },
+    };
+    const triage = renderLoopBrief({ ...base, role: 'triage', lastLap });
+    expect(triage).toContain('- AC1: never starts');
+    expect(triage).toContain('FAILED TimerTest');
+    const implementer = renderLoopBrief({ ...base, lastLap: { ...lastLap, blocking: [], testFailure: undefined, triageReason: 'retry with a stub' } });
+    expect(implementer).toContain('The previous Implementer reported itself blocked: need the sandbox key');
+    expect(implementer).toContain("Triage's reason: retry with a stub");
   });
 });

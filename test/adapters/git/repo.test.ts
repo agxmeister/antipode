@@ -84,6 +84,26 @@ describe('GitRepo (temporary local remote, AD-24)', () => {
     expect(existsSync(join(stray, 'junk'))).toBe(false);
   });
 
+  it('pushes a Task Branch from its worktree through the bare clone to origin, forced; a refusing remote throws', async () => {
+    const remote = createTempRemote();
+    const base = remote.commit({ 'antipod.yaml': validRecipe() });
+    const { repo } = setup();
+    await repo.ensureClone(remote.dir, 'p');
+    const worktree = await repo.addTaskWorktree('p', 4, 'timer', base);
+    await repo.commitInWorktree(worktree, { 'timer.txt': 'one\n' }, [], 'first');
+    await repo.pushBranch('p', 'antipod/4-timer');
+    expect(git(remote.dir, 'rev-parse', 'refs/heads/antipod/4-timer')).toBe(git(worktree, 'rev-parse', 'HEAD'));
+    // A rewritten Branch still goes up: the Branch is Antipode's own (AD-5).
+    git(worktree, '-c', 'user.name=T', '-c', 'user.email=t@x', 'commit', '--quiet', '--amend', '-m', 'rewritten');
+    await repo.pushBranch('p', 'antipod/4-timer');
+    expect(git(remote.dir, 'rev-parse', 'refs/heads/antipod/4-timer')).toBe(git(worktree, 'rev-parse', 'HEAD'));
+    expect(git(remote.dir, 'rev-parse', 'main')).toBe(base);
+
+    writeFileSync(join(remote.dir, '.git', 'hooks', 'pre-receive'), '#!/bin/sh\necho closed >&2\nexit 1\n', { mode: 0o755 });
+    await repo.commitInWorktree(worktree, { 'timer.txt': 'two\n' }, [], 'second');
+    await expect(repo.pushBranch('p', 'antipod/4-timer')).rejects.toThrow(/git .*push.* failed/);
+  });
+
   it('clones bare with the origin refspec, and reads the Recipe at origin/main', async () => {
     const remote = createTempRemote();
     const sha = remote.commit({ 'antipod.yaml': validRecipe() });

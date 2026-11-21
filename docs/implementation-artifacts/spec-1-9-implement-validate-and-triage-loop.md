@@ -2,7 +2,8 @@
 title: 'Implement, validate and triage loop'
 type: 'feature'
 created: '2026-11-20'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '7f27251dbb88731a856883d01baa99633668554b'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -72,12 +73,12 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `migrations/0009-loop.ts`, `ports/store.ts`, SQLite store -- output and Parking Lot rows -- AD-2, AD-16
-- [ ] `transitions.ts`, `events.ts`, `coordinator.ts` -- blocked arm, spent Triage, Stuck notify, raise and cancel commands -- AD-3
-- [ ] `src/app/stages.ts` -- output storage, blocked mapping, per-Role briefs -- AD-4, AD-21
-- [ ] `ports/repo.ts`, `adapters/git/repo.ts`, `src/app/test-step.ts`, `daemon.ts` -- push and test Stage -- AD-5, AD-7
-- [ ] `cards/stuck-card.ts`, `messenger.ts` -- Stuck card and buttons -- AD-10, DESIGN
-- [ ] `test/**` -- one test per matrix row, plus updates to the transitions table and the budget block -- AD-24
+- [x] `migrations/0009-loop.ts`, `ports/store.ts`, SQLite store -- output and Parking Lot rows -- AD-2, AD-16
+- [x] `transitions.ts`, `events.ts`, `coordinator.ts` -- blocked arm, spent Triage, Stuck notify, raise and cancel commands -- AD-3
+- [x] `src/app/stages.ts` -- output storage, blocked mapping, per-Role briefs -- AD-4, AD-21
+- [x] `ports/repo.ts`, `adapters/git/repo.ts`, `src/app/test-step.ts`, `daemon.ts` -- push and test Stage -- AD-5, AD-7
+- [x] `cards/stuck-card.ts`, `messenger.ts` -- Stuck card and buttons -- AD-10, DESIGN
+- [x] `test/**` -- one test per matrix row, plus updates to the transitions table and the budget block -- AD-24
 
 **Acceptance Criteria:**
 - Given a scripted fake `claude` (Implementer `done`, Validator `blocking`, Implementer `done`, Validator `pass`) and a passing fake test runner, when the Task is approved and runs, then it reaches `evidencing` with `budget_used` 2, the temporary remote's Branch head equals the worktree head, and the second Implementer brief contains the blocking finding's note.
@@ -89,6 +90,36 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+Pass 1 (blind-hunter BH, edge-case-hunter EC, verification-gap VG).
+
+| # | Finding | Verdict | Evidence | Route |
+|---|---------|---------|----------|-------|
+| 1 | BH/EC/VG: `TestStep.run` only logs when `#test` or the result `applyEvent` rejects | medium | `Steps.run` can throw from its `mkdir` calls before its try; the Stage then stays `running` with no event or notice until restart | patch |
+| 2 | EC: `stop()` racing `applyEvent(stage_started)` still starts push and step | low | `run()` checks `#stopped` only before the await; the fix is one guard | patch |
+| 3 | EC: pause then resume from `stuck` sends a second card reading "Stuck" | medium | `stuck` is in `ACTIVE_STATES`; `enter('paused')` nulls `stuck_reason`, `resume` re-enters `stuck` and the card falls back to "Stuck" | patch |
+| 4 | BH/EC: Triage on a spent budget does not see the blocking findings or the test log tail | medium | `renderLoopBrief` `triage` case renders only blocked summary and non-blocking findings, though `lastLapOf` holds both | patch |
+| 5 | BH: the Implementer brief after blocked → `rerun` drops the blocker summary | low | `implementer` case renders blocking, test failure and Triage reason, never `lap.implementer.summary` | patch |
+| 6 | BH: "Triage sent the Task back" is wrong after a spent-budget Triage and `Raise budget` | low | that Triage ended at `stuck`; one-line wording fix | patch |
+| 7 | BH: `logTail` can start mid-line or mid-UTF-8 character | low | reads the last 16 KiB at a byte offset; dropping the first line is a direct correction | patch |
+| 8 | VG/BH: no test that a spent-budget `park` parks nothing | low | only parking test uses the default budget; guard in `#deliver` untested | patch |
+| 9 | VG: no test that the daemon routes `cancel_stage` and shutdown to `TestStep` | low | `daemon.test.ts` only checks registration; `test-step.test.ts` calls `cancel` directly | patch |
+| 10 | EC: `Raise budget +2` on a Stuck card from `deps_unsatisfiable` starts `implementing` | medium | the frozen intent puts the button on that card and `stuck --budget_raised--> implementing` predates this story (AD-3) | defer |
+| 11 | EC: Triage entered by `implementer_blocked` may `park`, sending an unpushed, untested Branch to `evidencing` | medium | follows the Owner decision of 2026-11-20 (Triage returns rerun, park or stuck); needs an Owner call | defer |
+| 12 | BH/EC: leaving `stuck` by `amended` never closes the card | low | `amended` from the Stuck card arrives with replies in 1-14 | defer |
+| 13 | BH: the same non-blocking finding can be parked again every lap | low | no dedupe and the Validator brief does not list the Parking Lot; fix adds new logic | defer |
+| 14 | BH: `parking_lot.criterion_id` is the Validator's free-text label | low | not checked against `criteria`; matters for promotion in 1-17 | defer |
+| 15 | BH: a spent-budget `park` loses its non-blocking findings | false | the frozen intent applies that `park` as `stuck`; nothing is parked by design | reject |
+| 16 | BH: test outcomes other than timeout or non-zero exit vanish from the brief | false | `STEP_OUTCOMES` is `exited`, `timeout`, `capability_busy`; `capability_busy` is `stage_failed` | reject |
+| 17 | BH: uncommitted work can pass `test` while a stale Branch is pushed | false | `roles/implementer/prompt.md:7` tells the Implementer to commit; the Validator judges the Branch | reject |
+| 18 | BH: over-limit fallback in `renderStuckCard` double-escapes | low | unreachable: title 80, reason 300 and three 140-char laps stay far below `TEXT_LIMIT` | reject |
+| 19 | BH: an edit to the Stuck card is dropped if another card was sent after it | low | in `stuck` no other `*_card` is sent; the latest Stuck card is the one edited | reject |
+| 20 | BH: `'draftId' in context` duck typing in `renderBrief` | false | no named harm; tsc checks both shapes | reject |
+| 21 | BH: `raise_budget` reads `amount` unchecked | false | `args` are written by the card renderer only; no path writes a malformed amount | reject |
+| 22 | EC: a cancel during `pushBranch` still pushes the Branch | low | the Branch is kept on cancel anyway; fix adds signal plumbing | reject |
+| 23 | EC: no toast when the Stuck card send failed and the Owner taps | false | a card that was never delivered has no buttons to tap | reject |
+| 24 | BH: footer reply and "last Evidence resent" ordering not implemented | false | the frozen Never section defers both to 1-14 and 1-10 | reject |
+| 25 | BH: no tests for `TestStep.stop`, empty `insertParkedFindings`, over-limit card | low | covered in part by #9; the rest guard no demonstrated defect | reject |
 
 ## Design Notes
 

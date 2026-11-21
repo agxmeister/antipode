@@ -243,3 +243,49 @@ describe('Coordinator (AD-3)', () => {
     expect(c.store.pendingEffects().map((e) => e.effect)).toEqual([{ kind: 'back_online', project_id: busy.id, gap_ms: 7_200_000 }]);
   });
 });
+
+describe('the loop through the Coordinator (AD-3, CAP-13)', () => {
+  /** Runs the current Stage to its result. */
+  async function finish(c: Awaited<ReturnType<typeof setup>>, event: (stageId: string) => Event): Promise<void> {
+    const task = c.store.getTask(c.task.id)!;
+    const stageId = task.current_stage_id!;
+    if (c.store.getStage(stageId)?.status === 'starting') await c.coordinator.applyEvent(task.id, { type: 'stage_started', stage_id: stageId });
+    await c.coordinator.applyEvent(task.id, event(stageId));
+  }
+
+  it('a spent budget goes through Triage once; its rerun ends stuck with its reason and one Stuck card', async () => {
+    const c = await setup({ ...POLICY, limits: { ...POLICY.limits, iteration_budget: 1 } });
+    await toImplementing(c);
+    await finish(c, (id) => ({ type: 'implementer_done', stage_id: id }));
+    await finish(c, (id) => ({ type: 'test_passed', stage_id: id }));
+    await finish(c, (id) => ({ type: 'blocking_findings', stage_id: id }));
+    expect(c.store.getTask(c.task.id)).toMatchObject({ state: 'triage', budget_used: 1 });
+    await finish(c, (id) => ({ type: 'rerun', stage_id: id, reason: 'AC1 needs a new approach' }));
+    expect(c.store.getTask(c.task.id)).toMatchObject({ state: 'stuck', stuck_reason: 'AC1 needs a new approach', budget_used: 1 });
+    const cards = c.store.effectsOfTask(c.task.id).filter((row) => row.effect.kind === 'notify' && row.effect.notice_kind === 'stuck_card');
+    expect(cards.map((row) => row.effect)).toEqual([{ kind: 'notify', notice_kind: 'stuck_card', task_id: c.task.id, payload: { reason: 'AC1 needs a new approach' } }]);
+
+    // Cancel Task only swaps the keyboard while stuck.
+    expect(await c.coordinator.refreshCard(c.task.id, 'stuck_card', 'stuck', { mode: 'confirm' })).toBe(true);
+    expect(c.store.latestNotify(c.task.id, 'stuck_card')?.effect).toMatchObject({ payload: { mode: 'confirm' } });
+
+    expect(await c.coordinator.raiseBudget(c.task.id, 2)).toMatchObject({ applied: true, state: 'implementing' });
+    expect(c.store.getTask(c.task.id)).toMatchObject({ budget_limit: 3, budget_used: 1, stuck_reason: null });
+    expect(await c.coordinator.refreshCard(c.task.id, 'stuck_card', 'stuck', { mode: 'restore' })).toBe(false);
+    expect(await c.coordinator.raiseBudget(c.task.id, 2)).toEqual({ applied: false, ignored: 'invalid' });
+  });
+
+  it('a non-blocking Triage after a resume still parks; cancelTask cancels from any open state', async () => {
+    const c = await setup();
+    await toImplementing(c);
+    await finish(c, (id) => ({ type: 'implementer_done', stage_id: id }));
+    await finish(c, (id) => ({ type: 'test_passed', stage_id: id }));
+    await finish(c, (id) => ({ type: 'nonblocking_findings', stage_id: id }));
+    await c.coordinator.applyEvent(c.task.id, { type: 'pause' });
+    await c.coordinator.applyEvent(c.task.id, { type: 'resume' });
+    expect(c.store.getTask(c.task.id)?.state).toBe('triage');
+    await finish(c, (id) => ({ type: 'parked', stage_id: id, reason: 'cosmetic' }));
+    expect(c.store.getTask(c.task.id)?.state).toBe('evidencing');
+    expect(await c.coordinator.cancelTask(c.task.id)).toMatchObject({ applied: true, state: 'cancelled' });
+  });
+});

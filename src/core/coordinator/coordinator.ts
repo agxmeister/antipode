@@ -1,6 +1,7 @@
 import type { Effect, EffectRow } from '../domain/effects.ts';
 import { AntipodError } from '../domain/errors.ts';
 import { stageIdOf, type CreationEventType, type Event, type IgnoreReason } from '../domain/events.ts';
+import { triageCause } from '../domain/loop.ts';
 import type { EvidenceKind } from '../domain/recipe.ts';
 import { ulid } from '../domain/ids.ts';
 import type { Clock } from '../ports/clock.ts';
@@ -263,6 +264,33 @@ export class Coordinator {
     });
   }
 
+  /** `Raise budget +2` on the Stuck card (CAP-13): `budget_raised(n)`, back to `implementing` with no budget unit (AD-3). */
+  raiseBudget(taskId: string, amount: number): Promise<ApplyResult> {
+    return this.applyEvent(taskId, { type: 'budget_raised', amount });
+  }
+
+  /** `Confirm cancel` (CAP-13): `cancel` from any non-terminal state; the current Stage is cancelled, the Branch kept (AD-3). */
+  cancelTask(taskId: string): Promise<ApplyResult> {
+    return this.applyEvent(taskId, { type: 'cancel' });
+  }
+
+  /**
+   * Re-renders a Task's card without an event (a button that only changes the keyboard, such as
+   * `Cancel Task` asking for confirmation): queues one `notify` of `noticeKind` with `payload` while the
+   * Task is in `state`. Resolves whether it queued.
+   */
+  refreshCard(taskId: string, noticeKind: string, state: TaskState, payload: Record<string, unknown>): Promise<boolean> {
+    return this.#enqueue(() => {
+      const queued = this.#store.transaction(() => {
+        if (this.#requireTask(taskId).state !== state) return false;
+        this.#insertEffect(taskId, { kind: 'notify', notice_kind: noticeKind, task_id: taskId, payload });
+        return true;
+      });
+      if (queued) this.#onEffectsCommitted();
+      return queued;
+    });
+  }
+
   /** Queues one `scan_inbox` for the Project unless one is already pending (AD-5). Resolves whether it queued. */
   requestInboxScan(projectId: string): Promise<boolean> {
     return this.#enqueue(() => {
@@ -400,6 +428,7 @@ export class Coordinator {
       nextTaskNo: () => this.#store.nextTaskNo(task.project_id),
       approvalRefusal: (event) => approvalRefusal(this.#store, task, event.evidence_kinds),
       hasContract: () => this.#store.latestContract(task.id) !== undefined,
+      triageCause: () => triageCause(this.#store.stageEventsOfTask(task.id)),
     };
   }
 

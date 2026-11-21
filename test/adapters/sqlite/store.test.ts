@@ -56,7 +56,7 @@ function effect(taskId: string | null, kind: 'integrate' | 'run_release' = 'inte
 }
 
 describe('SqliteStore', () => {
-  it('migrations 0002 to 0008 create the STRICT Coordinator, Telegram, step and contract tables', () => {
+  it('migrations 0002 to 0009 create the STRICT Coordinator, Telegram, step, contract and Parking Lot tables', () => {
     const ts = setup();
     const tables = ts.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>;
     expect(tables.map((t) => t.name)).toEqual([
@@ -69,6 +69,7 @@ describe('SqliteStore', () => {
       'effects',
       'intake_messages',
       'outbox',
+      'parking_lot',
       'projects',
       'settings',
       'stage_events',
@@ -78,7 +79,7 @@ describe('SqliteStore', () => {
       'tasks',
       'telegram_messages',
     ]);
-    for (const table of ['tasks', 'task_dependencies', 'outbox', 'callbacks', 'telegram_messages', 'step_runs', 'capability_leases', 'contracts', 'criteria', 'draft_questions', 'contract_sources', 'intake_messages']) {
+    for (const table of ['tasks', 'task_dependencies', 'outbox', 'callbacks', 'telegram_messages', 'step_runs', 'capability_leases', 'contracts', 'criteria', 'draft_questions', 'contract_sources', 'intake_messages', 'parking_lot']) {
       const sql = ts.db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(table) as { sql: string };
       expect(sql.sql).toContain('STRICT');
     }
@@ -163,6 +164,46 @@ describe('SqliteStore', () => {
     delete (s3 as Partial<Stage>).retries;
     ts.store.insertStage(s3);
     expect(ts.store.getStage(s3.id)?.retries).toBeNull();
+  });
+
+  it('stages: output round-trips as JSON, stagesOfTask filters by role (migration 0009)', () => {
+    const ts = setup();
+    const p = project('a');
+    ts.store.insertProject(p);
+    const t = task(p.id);
+    ts.store.insertTask(t);
+    const impl = stage(t.id);
+    const test = stage(t.id, { role: 'test' });
+    ts.store.insertStage(impl);
+    ts.store.insertStage(test);
+    expect(ts.store.getStage(impl.id)).not.toHaveProperty('output');
+    ts.store.setStageOutput(impl.id, { status: 'done', summary: 'did it' });
+    expect(ts.store.getStage(impl.id)?.output).toEqual({ status: 'done', summary: 'did it' });
+    expect(ts.store.stagesOfTask(t.id, 'test').map((s) => s.id)).toEqual([test.id]);
+    expect(ts.store.stagesOfTask(t.id).map((s) => s.id)).toEqual([impl.id, test.id]);
+    expect(() => ts.store.setStageOutput('missing', {})).toThrow(/not found/);
+  });
+
+  it('parking_lot: P<n> numbered per Task after the highest, open, with the source Stage (AD-16)', () => {
+    const ts = setup();
+    const p = project('a');
+    ts.store.insertProject(p);
+    const t = task(p.id);
+    const other = task(p.id, { task_no: 2 });
+    ts.store.insertTask(t);
+    ts.store.insertTask(other);
+    const triage = stage(t.id, { role: 'triage' });
+    ts.store.insertStage(triage);
+    const first = ts.store.insertParkedFindings(t.id, triage.id, [{ criterion_id: 'AC1', note: 'quiet' }, { criterion_id: 'AC2', note: 'label' }], NOW);
+    expect(first.map((f) => [f.p_no, f.criterion_id, f.status, f.source_stage_id])).toEqual([
+      [1, 'AC1', 'open', triage.id],
+      [2, 'AC2', 'open', triage.id],
+    ]);
+    ts.store.insertParkedFindings(t.id, triage.id, [{ criterion_id: 'AC3', note: 'later' }], NOW);
+    ts.store.insertParkedFindings(other.id, triage.id, [{ criterion_id: 'AC1', note: 'own numbering' }], NOW);
+    expect(ts.store.parkedFindings(t.id).map((f) => f.p_no)).toEqual([1, 2, 3]);
+    expect(ts.store.parkedFindings(other.id).map((f) => f.p_no)).toEqual([1]);
+    expect(() => ts.db.prepare("UPDATE parking_lot SET status = 'gone'").run()).toThrow(/CHECK/);
   });
 
   it('stage_events append in order and read back with their payload', () => {

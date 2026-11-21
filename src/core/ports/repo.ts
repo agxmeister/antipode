@@ -35,6 +35,11 @@ export interface Repo {
   syncMain(name: string): Promise<string>;
   /** Adds the Task worktree on Branch `antipod/<taskNo>-<slug>` from `baseSha`; returns its path. Idempotent. */
   addTaskWorktree(name: string, taskNo: number, slug: string, baseSha: string): Promise<string>;
+  /**
+   * Pushes Branch `branch` (committed in its Task worktree, which shares the bare clone's refs) through
+   * the bare clone to `origin` (AD-5). Throws with git's reason when the remote refuses or is unreachable.
+   */
+  pushBranch(name: string, branch: string): Promise<void>;
   /** Removes the Task worktree (its untracked files with it); the Branch is kept. */
   removeTaskWorktree(name: string, taskNo: number): Promise<void>;
 }

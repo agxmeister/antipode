@@ -3,7 +3,8 @@ import { basename, dirname, join } from 'node:path';
 import type { RoleConfigResolver, RoleVars } from '../adapters/claude-cli/role-config.ts';
 import { INTAKE_ROLE, type Coordinator, type EventRows } from '../core/coordinator/coordinator.ts';
 import { sortedCriteria } from '../core/coordinator/drafts.ts';
-import type { ContractRow, CriterionRow, DraftQuestionRow, IntakeMessageRow } from '../core/domain/contract.ts';
+import { activeCriteria, branchName, slugOf, type ContractRow, type CriterionRow, type DraftQuestionRow, type IntakeMessageRow } from '../core/domain/contract.ts';
+import { lapsOf, lastLapOf, triageCause, type Lap, type LastLap, type ParkedFinding } from '../core/domain/loop.ts';
 import { EVIDENCE_KINDS, RECIPE_FILE } from '../core/domain/recipe.ts';
 import type { EffectOf } from '../core/domain/effects.ts';
 import type { Event } from '../core/domain/events.ts';
@@ -15,6 +16,8 @@ import type { AgentAuth, AgentRunner, AgentRunSpec } from '../core/ports/agent-r
 import { silentLog, type Log } from '../core/ports/log.ts';
 import type { Repo } from '../core/ports/repo.ts';
 import type { Store } from '../core/ports/store.ts';
+import type { Clock } from '../core/ports/clock.ts';
+import { systemClock } from './clock.ts';
 import { validateRecipeText } from './recipe-file.ts';
 import { readInstanceSecrets } from './secrets.ts';
 
@@ -66,6 +69,8 @@ export interface StagesOptions {
   runBin: string;
   /** Read at every launch so SIGHUP applies. */
   config: () => { roles: Readonly<Record<string, Partial<RoleLimits>>>; agent: { auth: AgentAuth }; intake?: { context_messages: number } };
+  /** Stamps Parking Lot rows; the system clock by default. */
+  clock?: Clock;
   /** Where `PATH`, `HOME`, `LANG` and `TMPDIR` come from; `process.env` by default. */
   baseEnv?: NodeJS.ProcessEnv;
   log?: Log;
@@ -86,13 +91,13 @@ function errorText(error: unknown): string {
 }
 
 /**
- * The fixed discriminator → event map (AD-4, Owner decision 2026-11-15). Undefined for output that
- * goes through an output hook: Implementer `blocked`, `EvidenceOutput`, `OwnerInstruction`.
+ * The fixed discriminator → event map (AD-4, Owner decisions 2026-11-15 and 2026-11-20). Undefined for
+ * output that goes through an output hook: `EvidenceOutput`, `OwnerInstruction`.
  */
 export function eventForOutput(schema: OutputSchemaName, state: TaskState, output: unknown, stageId: string, usage: StageUsage | null): Event | undefined {
   switch (schema) {
     case 'implementer':
-      return (output as ImplementerOutput).status === 'done' ? { type: 'implementer_done', stage_id: stageId, usage } : undefined;
+      return { type: (output as ImplementerOutput).status === 'done' ? 'implementer_done' : 'implementer_blocked', stage_id: stageId, usage };
     case 'validator': {
       const value = output as ValidatorOutput;
       if (state === 'verifying') {
@@ -106,8 +111,8 @@ export function eventForOutput(schema: OutputSchemaName, state: TaskState, outpu
     }
     case 'triage': {
       const value = output as TriageOutput;
-      if (value.decision === 'rerun') return { type: 'rerun', stage_id: stageId, usage };
-      if (value.decision === 'park') return { type: 'parked', stage_id: stageId, usage };
+      if (value.decision === 'rerun') return { type: 'rerun', stage_id: stageId, reason: value.reason, usage };
+      if (value.decision === 'park') return { type: 'parked', stage_id: stageId, reason: value.reason, usage };
       return { type: 'reason_written', stage_id: stageId, reason: value.reason, usage };
     }
     default:
@@ -265,10 +270,22 @@ export class Stages {
     }
     if (event === undefined) {
       this.#log.warn({ event: 'stage_output_unhandled', ...fields, output_schema: schema }, 'stage_output_unhandled');
-      event = { type: 'stage_failed', stage_id: stage.id, reason: UNHANDLED_OUTPUT, usage };
-      rows = undefined;
+      await this.#options.coordinator.applyEvent(task.id, { type: 'stage_failed', stage_id: stage.id, reason: UNHANDLED_OUTPUT, usage });
+      return;
     }
-    await this.#options.coordinator.applyEvent(task.id, event, rows);
+    const { store } = this.#options;
+    const hookRows = rows;
+    const parked = event.type === 'parked';
+    // The output is stored with the event it mapped to, only when that event applies (AD-3, AD-21).
+    await this.#options.coordinator.applyEvent(task.id, event, (t) => {
+      store.setStageOutput(stage.id, output);
+      hookRows?.(t);
+      // `park` parks the lap's non-blocking findings unless a spent budget turned it into `stuck` (AD-3).
+      if (parked && store.getTask(t.id)?.state === 'evidencing') {
+        const findings = lastLapOf(store.stagesOfTask(t.id), stage.id)?.nonblocking ?? [];
+        if (findings.length > 0) store.insertParkedFindings(t.id, stage.id, findings, (this.#options.clock ?? systemClock).now().toISOString());
+      }
+    });
   }
 
   async #fail(taskId: string, stageId: string, reason: string, error: unknown): Promise<void> {
@@ -312,7 +329,7 @@ export class Stages {
       spec: {
         stageId: stage.id,
         cwd,
-        prompt: renderBrief(task, stage, limits, stage.role === INTAKE_ROLE ? await this.#intakeBrief(project, task) : undefined),
+        prompt: renderBrief(task, stage, limits, stage.role === INTAKE_ROLE ? await this.#intakeBrief(project, task) : this.#loopBrief(task, stage)),
         transcriptPath: this.transcriptPath(stage.id),
         outputSchema: OUTPUT_SCHEMAS[schema],
         settingsPath: files.settingsPath,
@@ -352,6 +369,26 @@ export class Stages {
       criteria: sortedCriteria(store.criteriaOf(task.id)),
       questions: store.questionsOf(task.id),
       messages: limit === 0 ? [] : rest.slice(-limit),
+    };
+  }
+
+  /** What a loop Role's brief is rendered from, all rows (AD-4, AD-21). */
+  #loopBrief(task: Task, stage: Stage): LoopBrief {
+    const { store } = this.#options;
+    const stages = store.stagesOfTask(task.id);
+    const title = task.title ?? null;
+    const lastLap = lastLapOf(stages, stage.id);
+    return {
+      role: stage.role,
+      title,
+      goal: store.latestContract(task.id)?.goal ?? null,
+      branch: task.task_no === null ? null : branchName(task.task_no, task.slug ?? slugOf(title ?? 'task')),
+      criteria: activeCriteria(sortedCriteria(store.criteriaOf(task.id))),
+      ...(lastLap === undefined ? {} : { lastLap }),
+      laps: lapsOf(stages),
+      parked: store.parkedFindings(task.id).filter((finding) => finding.status === 'open'),
+      budget: { used: task.budget_used, limit: task.budget_limit },
+      budgetSpent: stage.role === 'triage' && triageCause(store.stageEventsOfTask(task.id)) === 'budget_spent',
     };
   }
 
@@ -487,19 +524,113 @@ export function renderIntakeBrief(brief: IntakeBrief): string {
   return lines.join('\n');
 }
 
+/** The rows a loop Role's brief is rendered from (AD-4, AD-21). */
+export interface LoopBrief {
+  role: string;
+  title: string | null;
+  goal: string | null;
+  /** `antipod/<task_no>-<slug>`; null before the Task has a number. */
+  branch: string | null;
+  /** Active criteria, `AC<n>` order. */
+  criteria: readonly CriterionRow[];
+  /** What ended the previous lap; absent before the first one. */
+  lastLap?: LastLap;
+  laps: readonly Lap[];
+  /** Open Parking Lot findings. */
+  parked: readonly ParkedFinding[];
+  budget: { used: number; limit: number };
+  /** A Triage deciding on a spent Iteration Budget (AD-3). */
+  budgetSpent: boolean;
+}
+
+function criteriaLines(criteria: readonly CriterionRow[]): string[] {
+  if (criteria.length === 0) return ['(no active criteria)'];
+  return criteria.map((criterion) => `- AC${criterion.ac_no} [${criterion.required_evidence}]: ${criterion.text}`);
+}
+
+function findingLines(findings: ReadonlyArray<{ criterion_id: string; note: string }>): string[] {
+  return findings.map((finding) => `- ${finding.criterion_id}: ${finding.note}`);
+}
+
+/** The last lap's blocking findings and failed test, as the Implementer and Triage briefs show them. */
+function failureLines(lap: LastLap): string[] {
+  const lines: string[] = [];
+  if (lap.blocking.length > 0) lines.push('Blocking findings of the Validator:', ...findingLines(lap.blocking), '');
+  if (lap.testFailure !== undefined) {
+    const how = lap.testFailure.outcome === 'timeout' ? 'timed out' : `exited ${lap.testFailure.exit_code}`;
+    lines.push(`The Recipe \`test\` step ${how}. The tail of its log:`, '', '```', lap.testFailure.log_tail ?? '', '```', '');
+  }
+  return lines;
+}
+
+/** The loop part of the brief for the Implementer, Validator and Triage Roles (AD-4, AD-21, CAP-19). */
+export function renderLoopBrief(brief: LoopBrief): string {
+  const lines: string[] = ['## Task', ''];
+  if (brief.title !== null) lines.push(`Title: ${brief.title}`);
+  if (brief.goal !== null) lines.push(`Goal: ${brief.goal}`);
+  if (brief.branch !== null) lines.push(`Branch: \`${brief.branch}\``);
+  lines.push('', '### Acceptance criteria', '', ...criteriaLines(brief.criteria), '');
+  const lap = brief.lastLap;
+  switch (brief.role) {
+    case 'implementer': {
+      const blocked = lap?.implementer.status === 'blocked';
+      if (lap !== undefined && (blocked || lap.blocking.length > 0 || lap.testFailure !== undefined || lap.triageReason !== undefined)) {
+        lines.push('### What the last lap left', '');
+        if (blocked) lines.push(`The previous Implementer reported itself blocked: ${lap.implementer.summary}`, '');
+        lines.push(...failureLines(lap));
+        if (lap.triageReason !== undefined) lines.push(`Triage's reason: ${lap.triageReason}`, '');
+      }
+      if (brief.parked.length > 0) {
+        lines.push('### Parked findings', '', 'These wait in the Parking Lot for the Owner; do not work on them.', ...brief.parked.map((p) => `- P${p.p_no} ${p.criterion_id}: ${p.note}`), '');
+      }
+      break;
+    }
+    case 'validator':
+      lines.push(
+        '### What to judge',
+        '',
+        'Judge the Branch as it is in this worktree against every criterion above. Read the code and run Recipe steps;',
+        'nothing anyone has said about the work counts as a verdict.',
+        '',
+      );
+      break;
+    case 'triage': {
+      if (lap?.implementer.status === 'blocked') lines.push('### The Implementer is blocked', '', lap.implementer.summary, '');
+      if (lap !== undefined && (lap.blocking.length > 0 || lap.testFailure !== undefined)) lines.push('### What the last lap left', '', ...failureLines(lap));
+      if (lap !== undefined && lap.nonblocking.length > 0) lines.push("### The Validator's non-blocking findings", '', ...findingLines(lap.nonblocking), '');
+      lines.push('### Laps so far', '');
+      if (brief.laps.length === 0) lines.push('(none)');
+      for (const each of brief.laps) lines.push(`- Lap ${each.n} (${each.status}): ${each.summary}`);
+      lines.push('', `Iteration Budget: ${brief.budget.used}/${brief.budget.limit} used.`, '');
+      if (brief.budgetSpent) {
+        lines.push(
+          'The Iteration Budget is spent: whatever you decide, the Task stops here for the Owner, who can raise the budget,',
+          'amend the criteria or cancel. Make `reason` the one line the Owner should read.',
+          '',
+        );
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  return lines.join('\n');
+}
+
 /**
  * The Stage brief, rendered from rows only (AD-21): number, Role, attempt and how to run Recipe steps;
- * for Intake also the draft (`renderIntakeBrief`). Correction note and Parking Lot join it in 1-9 and 1-10.
+ * for Intake the draft (`renderIntakeBrief`), for the loop Roles the contract and what the loop left
+ * (`renderLoopBrief`).
  */
-export function renderBrief(task: Task, stage: Stage, limits: RoleLimits, intake?: IntakeBrief): string {
+export function renderBrief(task: Task, stage: Stage, limits: RoleLimits, context?: IntakeBrief | LoopBrief): string {
   const name = task.task_no === null ? 'a draft Task (no number yet)' : `Task #${task.task_no}`;
-  if (intake !== undefined) {
+  if (context !== undefined && 'draftId' in context) {
     return [
       `# Antipode Stage brief`,
       '',
       `You are running the ${stage.role} Role for ${name}, attempt ${stage.attempt} of ${limits.retries + 1}.`,
       '',
-      renderIntakeBrief(intake),
+      renderIntakeBrief(context),
       'Your final answer is the structured output the schema asks for.',
       '',
     ].join('\n');
@@ -509,6 +640,7 @@ export function renderBrief(task: Task, stage: Stage, limits: RoleLimits, intake
     '',
     `You are running the ${stage.role} Role for ${name}, attempt ${stage.attempt} of ${limits.retries + 1}.`,
     '',
+    ...(context === undefined ? [] : [renderLoopBrief(context)]),
     'Run Recipe steps only with `antipod step <name>`, for example `antipod step build`. It blocks until the step ends,',
     'exits with the step\'s exit code and prints the path of its log and of its output directory (`ANTIPOD_OUT`).',
     '',

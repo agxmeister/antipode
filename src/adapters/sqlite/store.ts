@@ -12,6 +12,7 @@ import {
 import { evidenceKindSchema } from '../../core/domain/recipe.ts';
 import { effectSchema, effectStatusSchema, type EffectRow, type EffectStatus } from '../../core/domain/effects.ts';
 import { stageEventRowSchema, type StageEventRow } from '../../core/domain/events.ts';
+import { PARKED_STATUSES, type ParkedFinding } from '../../core/domain/loop.ts';
 import { stageSchema, type Stage, type StagePatch, type StageStatus } from '../../core/domain/stage.ts';
 import {
   capabilityLeaseSchema,
@@ -158,6 +159,23 @@ const intakeMessageRowSchema = z.object({
   at: z.string(),
 });
 
+const parkedRowSchema = z.object({
+  id: z.string().min(1),
+  task_id: z.string().min(1),
+  p_no: z.int().positive(),
+  criterion_id: z.string(),
+  note: z.string(),
+  status: z.enum(PARKED_STATUSES),
+  source_stage_id: z.string().nullable(),
+  created_at: z.string(),
+});
+
+/** `stages.output` is JSON in a TEXT column; a row without output has no `output` key. */
+function toStage(row: unknown): Stage {
+  const { output, ...rest } = row as Record<string, unknown>;
+  return stageSchema.parse(output === null || output === undefined ? rest : { ...rest, output: JSON.parse(String(output)) });
+}
+
 function toContractRow(row: unknown): ContractRow {
   const raw = row as Record<string, unknown>;
   return contractRowSchema.parse({ ...raw, depends_on: JSON.parse(String(raw['depends_on'] ?? '[]')) });
@@ -219,6 +237,11 @@ export class SqliteStore implements Store {
     insertStage: Statement;
     getStage: Statement;
     stagesOfTask: Statement;
+    stagesOfTaskRole: Statement;
+    setStageOutput: Statement;
+    insertParked: Statement;
+    maxParkedNo: Statement;
+    parkedFindings: Statement;
     appendStageEvent: Statement;
     stageEventsOfTask: Statement;
     insertEffect: Statement;
@@ -310,6 +333,11 @@ export class SqliteStore implements Store {
       insertStage: db.prepare(insertSql('stages', STAGE_COLUMNS)),
       getStage: db.prepare('SELECT * FROM stages WHERE id = ?'),
       stagesOfTask: db.prepare('SELECT * FROM stages WHERE task_id = ? ORDER BY id'),
+      stagesOfTaskRole: db.prepare('SELECT * FROM stages WHERE task_id = ? AND role = ? ORDER BY id'),
+      setStageOutput: db.prepare('UPDATE stages SET output = ? WHERE id = ?'),
+      insertParked: db.prepare(insertSql('parking_lot', ['id', 'task_id', 'p_no', 'criterion_id', 'note', 'status', 'source_stage_id', 'created_at'])),
+      maxParkedNo: db.prepare('SELECT COALESCE(MAX(p_no), 0) AS max FROM parking_lot WHERE task_id = ?'),
+      parkedFindings: db.prepare('SELECT * FROM parking_lot WHERE task_id = ? ORDER BY p_no'),
       appendStageEvent: db.prepare(insertSql('stage_events', EVENT_COLUMNS)),
       stageEventsOfTask: db.prepare('SELECT * FROM stage_events WHERE task_id = ? ORDER BY id'),
       insertEffect: db.prepare(insertSql('effects', ['effect_id', 'task_id', 'kind', 'payload', 'status', 'error', 'created_at', 'finished_at'])),
@@ -536,7 +564,7 @@ export class SqliteStore implements Store {
 
   getStage(id: string): Stage | undefined {
     const row = this.#stmt.getStage.get(id);
-    return row === undefined ? undefined : stageSchema.parse(row);
+    return row === undefined ? undefined : toStage(row);
   }
 
   updateStage(id: string, patch: StagePatch): void {
@@ -550,11 +578,42 @@ export class SqliteStore implements Store {
     return this.#db
       .prepare(`SELECT * FROM stages WHERE status IN (${placeholders(statuses.length)}) ORDER BY id`)
       .all(...statuses)
-      .map((row) => stageSchema.parse(row));
+      .map(toStage);
   }
 
-  stagesOfTask(taskId: string): Stage[] {
-    return this.#stmt.stagesOfTask.all(taskId).map((row) => stageSchema.parse(row));
+  stagesOfTask(taskId: string, role?: string): Stage[] {
+    return (role === undefined ? this.#stmt.stagesOfTask.all(taskId) : this.#stmt.stagesOfTaskRole.all(taskId, role)).map(toStage);
+  }
+
+  setStageOutput(stageId: string, output: unknown): void {
+    if (this.#stmt.setStageOutput.run(JSON.stringify(output ?? null), stageId).changes !== 1) {
+      throw new Error(`stages row ${stageId} not found`);
+    }
+  }
+
+  insertParkedFindings(taskId: string, sourceStageId: string, findings: ReadonlyArray<{ criterion_id: string; note: string }>, createdAt: string): ParkedFinding[] {
+    return this.transaction(() => {
+      let pNo = (this.#stmt.maxParkedNo.get(taskId) as { max: number }).max;
+      return findings.map((finding) => {
+        pNo += 1;
+        const row = parkedRowSchema.parse({
+          id: ulid(),
+          task_id: taskId,
+          p_no: pNo,
+          criterion_id: finding.criterion_id,
+          note: finding.note,
+          status: 'open',
+          source_stage_id: sourceStageId,
+          created_at: createdAt,
+        });
+        this.#stmt.insertParked.run(row);
+        return row;
+      });
+    });
+  }
+
+  parkedFindings(taskId: string): ParkedFinding[] {
+    return this.#stmt.parkedFindings.all(taskId).map((row) => parkedRowSchema.parse(row));
   }
 
   appendStageEvent(row: StageEventRow): void {

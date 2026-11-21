@@ -54,13 +54,16 @@ export const eventSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('stage_retries_exhausted'), reason: z.string().min(1).optional() }),
   // Stage and step results
   fromAgent('implementer_done'),
+  /** The Implementer reported `blocked`: Triage reads the blocker from its summary (Owner decision 2026-11-20). */
+  fromAgent('implementer_blocked'),
   fromStage('test_failed'),
   fromStage('test_passed'),
   fromAgent('blocking_findings'),
   fromAgent('nonblocking_findings'),
   fromAgent('pass'),
-  fromAgent('rerun'),
-  fromAgent('parked'),
+  // Triage's `reason` rides along: a Triage entered with `budget_spent` applies either as `reason_written` (AD-3).
+  z.strictObject({ type: z.literal('rerun'), stage_id: stageId, reason: z.string().min(1).optional(), usage }),
+  z.strictObject({ type: z.literal('parked'), stage_id: stageId, reason: z.string().min(1).optional(), usage }),
   z.strictObject({ type: z.literal('reason_written'), stage_id: stageId, reason: z.string().min(1), usage }),
   fromAgent('evidence_produced'),
   fromAgent('evidence_missing'),

@@ -54,3 +54,15 @@
 - source_spec: `docs/implementation-artifacts/spec-1-8-intake-drafts-from-text-and-the-inbox.md`
   summary: Make a failed `commit_contract` or `prepare_branch` block the Implementer `start_stage` and reach the Owner as an outbox notice, not only a `failed` effect row.
   evidence: `EffectExecutor.#runOne` marks a throwing effect `failed` and drains the next row, so the Implementer can start without the Branch projection and the Owner sees `⏳ Queued` with nothing following (review pass 1, #8).
+- source_spec: `docs/implementation-artifacts/spec-1-9-implement-validate-and-triage-loop.md`
+  summary: Decide what `Raise budget +2` does on a Stuck card from `deps_unsatisfiable`; today it starts `implementing` with dependencies still unsatisfiable.
+  evidence: The 1-9 frozen intent sends the card with both buttons on every entry to `stuck`, and AD-3 draws `stuck --budget_raised--> implementing` with no cause check (review pass 1, #10). Needs a correct-course.
+- source_spec: `docs/implementation-artifacts/spec-1-9-implement-validate-and-triage-loop.md`
+  summary: Decide whether a Triage entered by `implementer_blocked` may `park`, which sends an unpushed, untested Branch to `evidencing`.
+  evidence: The Owner decision of 2026-11-20 lets that Triage return rerun, park or stuck; `triage --parked--> evidencing` skips the push and test that only follow a `done` run (review pass 1, #11).
+- source_spec: `docs/implementation-artifacts/spec-1-9-implement-validate-and-triage-loop.md`
+  summary: Close the Stuck card with a state line when the Task leaves `stuck` by `amended`, once replies reach Intake (1-14).
+  evidence: `enter()` closes the card only for `budget_raised` and `cancel`; an amend leaves live buttons that answer with the stale toast (review pass 1, #12).
+- source_spec: `docs/implementation-artifacts/spec-1-9-implement-validate-and-triage-loop.md`
+  summary: Stop parking the same non-blocking finding again every lap, and tie `parking_lot.criterion_id` to a real criterion before promotion (1-17).
+  evidence: `insertParkedFindings` does no dedupe, the Validator brief does not list open parked findings, and `criterion_id` is the Validator's free-text label (review pass 1, #13, #14).

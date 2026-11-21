@@ -23,12 +23,25 @@ export interface TransitionContext {
   approvalRefusal?(event: EventOf<'approved'>): string | undefined;
   /** Whether the draft has a contract version, i.e. its Intake run was a revision (AD-3). Absent means no. */
   hasContract?(): boolean;
+  /**
+   * The event that entered the current `triage` visit (`triageCause` of `domain/loop.ts`). A Triage
+   * entered with `budget_spent` applies `rerun` and `parked` as `reason_written` (AD-3). Absent means unknown.
+   */
+  triageCause?(): string | undefined;
 }
 
 /** The Draft card, rendered from the rows; sent once, then edited in place. Payload `{refusal?, closed?}`. */
 export const DRAFT_CARD = 'draft_card';
 /** Intake gave up on a draft: `👀` becomes `❌` with `Couldn't process that — send it again.` (AD-10). */
 export const INTAKE_FAILED = 'intake_failed';
+/**
+ * The loud Stuck card (DESIGN `stuck-card`), sent on every entry to `stuck` with payload `{reason}`.
+ * Later renders edit that card: `{mode: 'confirm' | 'restore'}` swaps its buttons, `{closed: 'raised', amount}`
+ * and `{closed: 'cancelled'}` replace them with a state line.
+ */
+export const STUCK_CARD = 'stuck_card';
+/** `stuck_reason` of a spent budget whose Triage gave no reason. */
+export const BUDGET_SPENT_REASON = 'Iteration Budget spent';
 
 function draftCard(taskId: string, payload?: Record<string, unknown>): Effect {
   return { kind: 'notify', notice_kind: DRAFT_CARD, task_id: taskId, ...(payload === undefined ? {} : { payload }) };
@@ -118,8 +131,15 @@ function enter(next: TaskState, task: Task, stage: Stage | undefined, ctx: Trans
   patch.current_stage_id = null;
   if (next !== 'paused') patch.resume_state = null;
   if (next !== 'accept_pending' && next !== 'discard_pending') patch.undo_expires_at = null;
-  if (next !== 'stuck') patch.stuck_reason = null;
+  // A paused Stuck Task keeps its reason, so `resume` re-sends the card with it.
+  if (next !== 'stuck' && !(next === 'paused' && task.state === 'stuck')) patch.stuck_reason = null;
   if (next !== 'queued') patch.waiting_reason = null;
+  // Leaving `stuck` by the card's buttons closes the card with a state line (DESIGN `stuck-card`).
+  if (task.state === 'stuck' && opts.cause === 'budget_raised') {
+    effects.push({ kind: 'notify', notice_kind: STUCK_CARD, task_id: task.id, payload: { closed: 'raised', amount: (patch.budget_limit ?? task.budget_limit) - task.budget_limit } });
+  } else if (task.state === 'stuck' && opts.cause === 'cancel') {
+    effects.push({ kind: 'notify', notice_kind: STUCK_CARD, task_id: task.id, payload: { closed: 'cancelled' } });
+  }
 
   const role = STAGE_ROLES[next];
   if (role !== undefined) {
@@ -173,6 +193,10 @@ function enter(next: TaskState, task: Task, stage: Stage | undefined, ctx: Trans
     case 'paused':
       patch.resume_state = task.state;
       break;
+    case 'stuck':
+      // Every entry to `stuck` tells the Owner, whichever arrow it came by (CAP-13).
+      effects.push({ kind: 'notify', notice_kind: STUCK_CARD, task_id: task.id, payload: { reason: patch.stuck_reason ?? task.stuck_reason ?? '' } });
+      break;
     case 'integrating':
       effects.push({ kind: 'integrate', task_id: task.id });
       break;
@@ -208,6 +232,16 @@ function undoStillOpen(task: Task, ctx: TransitionContext): boolean {
   return task.undo_expires_at !== null && new Date(task.undo_expires_at).getTime() > ctx.now.getTime();
 }
 
+/** Whether the current Triage decides on a spent budget: then the loop ends at the Stuck card (AD-3). */
+function spent(ctx: TransitionContext): boolean {
+  return ctx.triageCause?.() === 'budget_spent';
+}
+
+/** `triage --> stuck: reason_written`, with Triage's reason as `stuck_reason`. */
+function reasonWritten(task: Task, stage: Stage | undefined, reason: string | undefined, ctx: TransitionContext): Applied {
+  return enter('stuck', task, stage, ctx, { cause: 'reason_written', stageUpdate: SUCCEEDED, patch: { stuck_reason: reason ?? BUDGET_SPENT_REASON } });
+}
+
 type RuleTable = { [S in TaskState]?: { [E in EventType]?: Rule<E> } };
 
 /** The AD-3 diagram, one entry per arrow. Generic events are handled in `transition` before this table. */
@@ -241,6 +275,8 @@ const TABLE: RuleTable = {
   waiting_on_dependencies: { deps_merged: go('queued') },
   implementing: {
     implementer_done: stageDone('testing'),
+    // A blocked Implementer goes to Triage without a push or a test (Owner decision 2026-11-20; AD-13).
+    implementer_blocked: stageDone('triage'),
     budget_spent: go('triage'),
   },
   testing: {
@@ -253,10 +289,11 @@ const TABLE: RuleTable = {
     pass: stageDone('evidencing'),
   },
   triage: {
-    rerun: stageDone('implementing'),
-    parked: stageDone('evidencing'),
-    reason_written: (task, stage, event, ctx) =>
-      enter('stuck', task, stage, ctx, { cause: event.type, stageUpdate: SUCCEEDED, patch: { stuck_reason: event.reason } }),
+    rerun: (task, stage, event, ctx) =>
+      spent(ctx) ? reasonWritten(task, stage, event.reason, ctx) : enter('implementing', task, stage, ctx, { cause: event.type, stageUpdate: SUCCEEDED }),
+    parked: (task, stage, event, ctx) =>
+      spent(ctx) ? reasonWritten(task, stage, event.reason, ctx) : enter('evidencing', task, stage, ctx, { cause: event.type, stageUpdate: SUCCEEDED }),
+    reason_written: (task, stage, event, ctx) => reasonWritten(task, stage, event.reason, ctx),
   },
   evidencing: {
     evidence_produced: stageDone('verifying'),

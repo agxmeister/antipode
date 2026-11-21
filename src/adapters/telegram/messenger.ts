@@ -12,6 +12,7 @@ import { backOnlineCard } from './cards/back-online.ts';
 import { escapeHtml, NO_KEYBOARD, textMessage, type CardEnv } from './cards/card.ts';
 import { defaultNotices, type NoticeRenderer } from './cards/index.ts';
 import { registrationFailedCard, registrationReplyCard } from './cards/registration.ts';
+import { renderStuckCard, STUCK_CARD } from './cards/stuck-card.ts';
 import { Poller, type CallbackCommand, type CommandHandler, type TextHandler } from './poller.ts';
 import { OutboxSender } from './sender.ts';
 
@@ -131,6 +132,7 @@ export class TelegramMessenger implements Messenger {
       log: this.#log,
       ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
     });
+    this.registerNotice(STUCK_CARD, renderStuckCard);
   }
 
   /** The env templates render with: callbacks rows, clock and time zone. */

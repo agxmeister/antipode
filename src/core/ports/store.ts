@@ -1,6 +1,7 @@
 import type { ContractRow, ContractSourceRow, CriterionRow, DraftQuestionRow, IntakeMessageRow } from '../domain/contract.ts';
 import type { EffectRow, EffectStatus } from '../domain/effects.ts';
 import type { StageEventRow } from '../domain/events.ts';
+import type { ParkedFinding } from '../domain/loop.ts';
 import type { Stage, StagePatch, StageStatus } from '../domain/stage.ts';
 import type { CapabilityLease, StepRun, StepRunEnd, StepRunStatus } from '../domain/step.ts';
 import type { Project, Task, TaskPatch, TaskState } from '../domain/task.ts';
@@ -76,7 +77,18 @@ export interface Store {
   getStage(id: string): Stage | undefined;
   updateStage(id: string, patch: StagePatch): void;
   stagesInStatus(statuses: readonly StageStatus[]): Stage[];
-  stagesOfTask(taskId: string): Stage[];
+  /** The Task's Stage attempts in insertion order; only those of `role` when given. */
+  stagesOfTask(taskId: string, role?: string): Stage[];
+  /** Stores a Stage attempt's typed output as JSON (AD-21); called in the transaction of the event it mapped to. */
+  setStageOutput(stageId: string, output: unknown): void;
+
+  /**
+   * Parks `findings` as `open` Parking Lot rows numbered `P<n>` after the Task's highest (AD-16), from
+   * the Triage Stage `sourceStageId`. Returns the rows inserted.
+   */
+  insertParkedFindings(taskId: string, sourceStageId: string, findings: ReadonlyArray<{ criterion_id: string; note: string }>, createdAt: string): ParkedFinding[];
+  /** Every Parking Lot row of the Task, `p_no` order. */
+  parkedFindings(taskId: string): ParkedFinding[];
 
   /** Append-only (AD-2). */
   appendStageEvent(row: StageEventRow): void;

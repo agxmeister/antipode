@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { branchName } from '../../core/domain/contract.ts';
 import { RepoUnreachableError } from '../../core/domain/errors.ts';
 import { silentLog, type Log } from '../../core/ports/log.ts';
 import { STAGING_PREFIX, type Repo } from '../../core/ports/repo.ts';
@@ -264,7 +265,7 @@ export class GitRepo implements Repo {
     const dir = this.cloneDir(name);
     const path = join(this.worktreesDir(name), String(taskNo));
     if (await this.#isWorktree(name, path)) return path;
-    const branch = `antipod/${taskNo}-${slug}`;
+    const branch = branchName(taskNo, slug);
     // Anything else at the path (a stray directory) would make `worktree add` fail.
     await rm(path, { recursive: true, force: true });
     await mkdir(this.worktreesDir(name), { recursive: true, mode: 0o700 });
@@ -275,6 +276,12 @@ export class GitRepo implements Repo {
     );
     await this.#git(['--git-dir', dir, 'worktree', 'add', '--quiet', ...(exists ? [path, branch] : ['-b', branch, path, baseSha])]);
     return path;
+  }
+
+  async pushBranch(name: string, branch: string): Promise<void> {
+    const ref = `refs/heads/${branch}`;
+    // The Branch is Antipode's own: the Implementer may have rewritten it, so the push is forced (AD-5).
+    await this.#git(['--git-dir', this.cloneDir(name), 'push', '--quiet', 'origin', `+${ref}:${ref}`]);
   }
 
   async removeTaskWorktree(name: string, taskNo: number): Promise<void> {

@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   COUNTING_CAUSES,
   DEFAULT_STAGE_RETRIES,
+  BUDGET_SPENT_REASON,
   DRAFT_CARD,
   INTAKE_FAILED,
   STAGE_ROLES,
+  STUCK_CARD,
   transition,
   type Applied,
   type TransitionContext,
@@ -109,7 +111,7 @@ const EXPECTED: Record<TaskState, Partial<Record<EventType, TaskState>>> = {
   discard_pending: { undone: 'awaiting_approval', undo_expired: 'cancelled' },
   queued: { deps_unmerged: 'waiting_on_dependencies', scheduler_start: 'implementing' },
   waiting_on_dependencies: { deps_merged: 'queued', deps_unsatisfiable: 'stuck' },
-  implementing: { implementer_done: 'testing', budget_spent: 'triage' },
+  implementing: { implementer_done: 'testing', implementer_blocked: 'triage', budget_spent: 'triage' },
   testing: { test_failed: 'implementing', test_passed: 'validating' },
   validating: { blocking_findings: 'implementing', nonblocking_findings: 'triage', pass: 'evidencing' },
   triage: { rerun: 'implementing', parked: 'evidencing', reason_written: 'stuck' },
@@ -279,11 +281,42 @@ describe('Iteration Budget (AD-3)', () => {
     expect(outcome.effects.map((e) => e.kind)).toEqual(['cancel_stage', 'start_stage']);
   });
 
-  it('budget_raised adds to the limit and re-enters implementing without counting', () => {
+  it('budget_raised adds to the limit and re-enters implementing without counting; the Stuck card closes', () => {
     const outcome = applied(transition(task('stuck', { budget_used: 5, budget_limit: 5, stuck_reason: 'x' }), undefined, { type: 'budget_raised', amount: 2 }, ctx()));
     expect(outcome.next).toBe('implementing');
     expect(outcome.patch).toMatchObject({ budget_limit: 7, stuck_reason: null, current_stage_id: 'new-1' });
     expect(outcome.patch.budget_used).toBeUndefined();
+    expect(outcome.effects[0]).toEqual({ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { closed: 'raised', amount: 2 } });
+  });
+
+  it('a Triage entered with budget_spent applies rerun and parked as reason_written with its reason (AD-3)', () => {
+    const spent = ctx({ triageCause: () => 'budget_spent' });
+    for (const type of ['rerun', 'parked'] as const) {
+      const outcome = applied(transition(task('triage'), stage('triage'), { type, stage_id: CURRENT, reason: 'two laps did not fix AC2' }, spent));
+      expect(outcome.next).toBe('stuck');
+      expect(outcome.stageUpdate).toEqual({ status: 'succeeded', reason: null });
+      expect(outcome.patch.stuck_reason).toBe('two laps did not fix AC2');
+      expect(outcome.effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { reason: 'two laps did not fix AC2' } }]);
+      expect(outcome.derived).toEqual([]);
+    }
+    expect(applied(transition(task('triage'), stage('triage'), { type: 'rerun', stage_id: CURRENT }, spent)).patch.stuck_reason).toBe(BUDGET_SPENT_REASON);
+  });
+
+  it('a Triage entered any other way applies rerun and parked as drawn', () => {
+    for (const cause of ['nonblocking_findings', 'implementer_blocked', undefined]) {
+      const other = ctx({ triageCause: () => cause });
+      expect(applied(transition(task('triage'), stage('triage'), sample('rerun'), other)).next).toBe('implementing');
+      expect(applied(transition(task('triage'), stage('triage'), sample('parked'), other)).next).toBe('evidencing');
+    }
+  });
+
+  it('rerun on a spent budget re-enters Triage once through budget_spent; that Triage ends at stuck', () => {
+    const rerun = applied(transition(task('triage', { budget_used: 2, budget_limit: 2 }), stage('triage'), sample('rerun'), ctx({ triageCause: () => 'nonblocking_findings' })));
+    expect(rerun.next).toBe('implementing');
+    expect(rerun.derived).toEqual([{ type: 'budget_spent' }]);
+    const spentTriage = applied(transition(task('triage', { budget_used: 2, budget_limit: 2 }), stage('triage'), sample('rerun'), ctx({ triageCause: () => 'budget_spent' })));
+    expect(spentTriage.next).toBe('stuck');
+    expect(spentTriage.derived).toEqual([]);
   });
 });
 
@@ -350,6 +383,41 @@ describe('Stage retries (AD-4)', () => {
     const usage = { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: null, cache_creation_input_tokens: null, cost_usd: 0.1, duration_ms: 5 };
     expect(applied(transition(task('implementing'), stage('implementing'), { type: 'implementer_done', stage_id: CURRENT, usage }, ctx())).next).toBe('testing');
     expect(applied(transition(task('implementing'), stage('implementing'), { type: 'stage_failed', stage_id: CURRENT, reason: 'timeout', usage: null }, ctx())).startStage?.attempt).toBe(2);
+  });
+});
+
+describe('the Stuck card (CAP-13)', () => {
+  it('every entry to stuck queues one loud stuck_card notice with the reason', () => {
+    const exhausted = applied(transition(task('testing'), stage('testing', { status: 'failed' }), { type: 'stage_retries_exhausted', reason: 'push: rejected' }, ctx()));
+    expect(exhausted.effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { reason: 'push: rejected' } }]);
+    const deps = applied(transition(task('waiting_on_dependencies', { current_stage_id: null }), undefined, { type: 'deps_unsatisfiable', reason: '#2 was cancelled' }, ctx()));
+    expect(deps.effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { reason: '#2 was cancelled' } }]);
+    const written = applied(transition(task('triage'), stage('triage'), sample('reason_written'), ctx()));
+    expect(written.effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { reason: 'cannot satisfy AC2' } }]);
+  });
+
+  it('pause then resume from stuck keeps the reason and re-sends the card with it', () => {
+    const paused = applied(transition(task('stuck', { current_stage_id: null, stuck_reason: 'needs the Owner' }), undefined, sample('pause'), ctx()));
+    expect(paused.next).toBe('paused');
+    expect(paused.patch.stuck_reason).toBeUndefined();
+    const resumed = applied(transition(task('paused', { current_stage_id: null, resume_state: 'stuck', stuck_reason: 'needs the Owner' }), undefined, sample('resume'), ctx()));
+    expect(resumed.next).toBe('stuck');
+    expect(resumed.effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { reason: 'needs the Owner' } }]);
+  });
+
+  it('cancel from stuck closes the card; cancel elsewhere and pause from stuck do not touch it', () => {
+    const cancelled = applied(transition(task('stuck', { current_stage_id: null, stuck_reason: 'x' }), undefined, sample('cancel'), ctx()));
+    expect(cancelled.effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { closed: 'cancelled' } }]);
+    expect(applied(transition(task('queued', { current_stage_id: null }), undefined, sample('cancel'), ctx())).effects).toEqual([]);
+    expect(applied(transition(task('stuck', { current_stage_id: null }), undefined, sample('pause'), ctx())).effects).toEqual([]);
+  });
+
+  it('implementer_blocked ends the Implementer succeeded and starts Triage with no budget unit and no test', () => {
+    const outcome = applied(transition(task('implementing'), stage('implementing'), sample('implementer_blocked'), ctx()));
+    expect(outcome.next).toBe('triage');
+    expect(outcome.stageUpdate).toEqual({ status: 'succeeded', reason: null });
+    expect(outcome.patch.budget_used).toBeUndefined();
+    expect(outcome.effects).toEqual([{ kind: 'start_stage', stage_id: 'new-1', task_id: 'task-1', role: 'triage', attempt: 1 }]);
   });
 });
 

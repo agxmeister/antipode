@@ -9,6 +9,10 @@ export const INBOX_FILE = /\.(yaml|md)$/;
 export function contractPath(taskNo: number): string {
   return `.antipod/tasks/${taskNo}.yaml`;
 }
+/** A Task's Branch, `antipod/<task_no>-<slug>` (AD-5). */
+export function branchName(taskNo: number, slug: string): string {
+  return `antipod/${taskNo}-${slug}`;
+}
 /** The commit message of a contract projection (AD-21). */
 export function contractCommitMessage(version: number): string {
   return `antipod: contract v${version}`;

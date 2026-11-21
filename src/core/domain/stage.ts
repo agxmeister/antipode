@@ -28,6 +28,12 @@ export const stageSchema = z.object({
    * retry rule reads it (AD-4, AD-15); null until then, and for the `test` step.
    */
   retries: z.int().nonnegative().nullish(),
+  /**
+   * The attempt's typed output, stored with the event it mapped to (AD-21: briefs are rendered from
+   * rows): Implementer summary and status, Validator findings, Triage reason, or the test step's
+   * `TestOutput`. Absent until then, and for an attempt that failed.
+   */
+  output: z.unknown().optional(),
 });
 export type Stage = z.infer<typeof stageSchema>;
 
