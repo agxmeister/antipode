@@ -28,6 +28,11 @@ export interface TransitionContext {
    * entered with `budget_spent` applies `rerun` and `parked` as `reason_written` (AD-3). Absent means unknown.
    */
   triageCause?(): string | undefined;
+  /**
+   * The event that entered the current `stuck` visit (`stuckCause` of `domain/loop.ts`). A Task stuck by
+   * `deps_unsatisfiable` ignores `budget_raised` as invalid (AD-3). Absent means unknown.
+   */
+  stuckCause?(): string | undefined;
 }
 
 /** The Draft card, rendered from the rows; sent once, then edited in place. Payload `{refusal?, closed?}`. */
@@ -291,8 +296,9 @@ const TABLE: RuleTable = {
   triage: {
     rerun: (task, stage, event, ctx) =>
       spent(ctx) ? reasonWritten(task, stage, event.reason, ctx) : enter('implementing', task, stage, ctx, { cause: event.type, stageUpdate: SUCCEEDED }),
+    // A blocked Branch was never pushed or tested, so it never parks its way to Evidence (AD-3).
     parked: (task, stage, event, ctx) =>
-      spent(ctx) ? reasonWritten(task, stage, event.reason, ctx) : enter('evidencing', task, stage, ctx, { cause: event.type, stageUpdate: SUCCEEDED }),
+      spent(ctx) || ctx.triageCause?.() === 'implementer_blocked' ? reasonWritten(task, stage, event.reason, ctx) : enter('evidencing', task, stage, ctx, { cause: event.type, stageUpdate: SUCCEEDED }),
     reason_written: (task, stage, event, ctx) => reasonWritten(task, stage, event.reason, ctx),
   },
   evidencing: {
@@ -414,6 +420,10 @@ export function transition(task: Task, stage: Stage | undefined, event: Event, c
     return { ignored: 'invalid' };
   }
   if (event.type === 'undo_expired' && (task.undo_expires_at === null || undoStillOpen(task, ctx))) {
+    return { ignored: 'invalid' };
+  }
+  // More budget cannot satisfy a dependency (AD-3, Sprint Change Proposal 2026-11-22).
+  if (event.type === 'budget_raised' && task.state === 'stuck' && ctx.stuckCause?.() === 'deps_unsatisfiable') {
     return { ignored: 'invalid' };
   }
   // Refused while a question is open or a criterion infeasible, even from a stale button (CAP-8).

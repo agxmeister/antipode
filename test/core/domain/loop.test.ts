@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StageEventRow } from '../../../src/core/domain/events.ts';
-import { lapsOf, lastLapOf, triageCause } from '../../../src/core/domain/loop.ts';
+import { lapsOf, lastLapOf, stuckCause, triageCause } from '../../../src/core/domain/loop.ts';
 import type { Stage } from '../../../src/core/domain/stage.ts';
 
 const AT = '2026-11-20T12:00:00.000Z';
@@ -48,5 +48,12 @@ describe('loop rows (AD-21)', () => {
     expect(triageCause([event('scheduler_start', 'queued', 'implementing'), event('budget_spent', 'implementing', 'triage'), event('stage_failed', 'triage', 'triage'), event('pause', 'triage', 'paused'), event('resume', 'paused', 'triage')])).toBe('budget_spent');
     expect(triageCause([event('budget_spent', 'implementing', 'triage'), event('rerun', 'triage', 'implementing'), event('nonblocking_findings', 'validating', 'triage')])).toBe('nonblocking_findings');
     expect(triageCause([event('implementer_blocked', 'implementing', 'triage', 'ignored')])).toBeUndefined();
+  });
+
+  it('stuckCause is the event that entered stuck, skipping a resume', () => {
+    expect(stuckCause([event('deps_unsatisfiable', 'waiting_on_dependencies', 'stuck'), event('pause', 'stuck', 'paused'), event('resume', 'paused', 'stuck')])).toBe('deps_unsatisfiable');
+    expect(stuckCause([event('deps_unsatisfiable', 'waiting_on_dependencies', 'stuck'), event('cancel', 'stuck', 'cancelled')])).toBe('deps_unsatisfiable');
+    expect(stuckCause([event('stage_retries_exhausted', 'testing', 'stuck')])).toBe('stage_retries_exhausted');
+    expect(stuckCause([])).toBeUndefined();
   });
 });

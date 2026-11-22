@@ -253,6 +253,20 @@ describe('the loop through the Coordinator (AD-3, CAP-13)', () => {
     await c.coordinator.applyEvent(task.id, event(stageId));
   }
 
+  it('a Task stuck by deps_unsatisfiable refuses raiseBudget, also after a pause and resume (2026-11-22)', async () => {
+    const c = await setup();
+    await c.coordinator.applyEvent(c.task.id, { type: 'draft_ready' });
+    await c.coordinator.applyEvent(c.task.id, APPROVED);
+    await c.coordinator.applyEvent(c.task.id, { type: 'deps_unmerged' });
+    await c.coordinator.applyEvent(c.task.id, { type: 'deps_unsatisfiable', reason: 'depends on cancelled #3' });
+    expect(c.store.getTask(c.task.id)?.state).toBe('stuck');
+    expect((await c.coordinator.raiseBudget(c.task.id, 2)).applied).toBe(false);
+    await c.coordinator.applyEvent(c.task.id, { type: 'pause' });
+    await c.coordinator.applyEvent(c.task.id, { type: 'resume' });
+    expect((await c.coordinator.raiseBudget(c.task.id, 2)).applied).toBe(false);
+    expect(c.store.getTask(c.task.id)).toMatchObject({ state: 'stuck', stuck_reason: 'depends on cancelled #3', budget_limit: POLICY.limits.iteration_budget });
+  });
+
   it('a spent budget goes through Triage once; its rerun ends stuck with its reason and one Stuck card', async () => {
     const c = await setup({ ...POLICY, limits: { ...POLICY.limits, iteration_budget: 1 } });
     await toImplementing(c);

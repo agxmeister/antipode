@@ -280,7 +280,7 @@ export class Stages {
     await this.#options.coordinator.applyEvent(task.id, event, (t) => {
       store.setStageOutput(stage.id, output);
       hookRows?.(t);
-      // `park` parks the lap's non-blocking findings unless a spent budget turned it into `stuck` (AD-3).
+      // `park` parks the lap's non-blocking findings unless a spent budget or a blocked Implementer turned it into `stuck` (AD-3).
       if (parked && store.getTask(t.id)?.state === 'evidencing') {
         const findings = lastLapOf(store.stagesOfTask(t.id), stage.id)?.nonblocking ?? [];
         if (findings.length > 0) store.insertParkedFindings(t.id, stage.id, findings, (this.#options.clock ?? systemClock).now().toISOString());
@@ -378,6 +378,7 @@ export class Stages {
     const stages = store.stagesOfTask(task.id);
     const title = task.title ?? null;
     const lastLap = lastLapOf(stages, stage.id);
+    const cause = stage.role === 'triage' ? triageCause(store.stageEventsOfTask(task.id)) : undefined;
     return {
       role: stage.role,
       title,
@@ -388,7 +389,8 @@ export class Stages {
       laps: lapsOf(stages),
       parked: store.parkedFindings(task.id).filter((finding) => finding.status === 'open'),
       budget: { used: task.budget_used, limit: task.budget_limit },
-      budgetSpent: stage.role === 'triage' && triageCause(store.stageEventsOfTask(task.id)) === 'budget_spent',
+      budgetSpent: cause === 'budget_spent',
+      blocked: cause === 'implementer_blocked',
     };
   }
 
@@ -541,6 +543,8 @@ export interface LoopBrief {
   budget: { used: number; limit: number };
   /** A Triage deciding on a spent Iteration Budget (AD-3). */
   budgetSpent: boolean;
+  /** A Triage deciding on a blocked Implementer: its `park` stops the Task like `stuck` (AD-3). */
+  blocked: boolean;
 }
 
 function criteriaLines(criteria: readonly CriterionRow[]): string[] {
@@ -606,6 +610,12 @@ export function renderLoopBrief(brief: LoopBrief): string {
         lines.push(
           'The Iteration Budget is spent: whatever you decide, the Task stops here for the Owner, who can raise the budget,',
           'amend the criteria or cancel. Make `reason` the one line the Owner should read.',
+          '',
+        );
+      } else if (brief.blocked) {
+        lines.push(
+          'The blocked work was never pushed or tested, so it cannot be parked: choose `rerun` or `stuck`.',
+          'A `park` stops the Task for the Owner like `stuck`, with your reason.',
           '',
         );
       }

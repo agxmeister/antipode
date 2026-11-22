@@ -162,4 +162,21 @@ describe('Stuck card (DESIGN stuck-card)', () => {
     const [cancelled] = renderStuckCard(notice(task, { closed: 'cancelled' }), e);
     expect(String(cancelled!.payload.params['text']).endsWith('Lap 4: fourth try\n\nCancelled')).toBe(true);
   });
+
+  it('stuck on unsatisfiable dependencies: Cancel Task alone, also when Keep restores the buttons (2026-11-22)', () => {
+    const e = env();
+    const task = stuckTask(e);
+    e.store.appendStageEvent({
+      id: 'ev1', task_id: 't1', stage_id: null, event_type: 'deps_unsatisfiable', payload: '{}', status: 'applied', ignore_reason: null,
+      from_state: 'waiting_on_dependencies', to_state: 'stuck', created_at: NOW,
+    });
+    const texts = (draft: { payload: { params: Record<string, unknown> } }) =>
+      (draft.payload.params['reply_markup'] as { inline_keyboard: Array<Array<{ text: string }>> }).inline_keyboard.map((row) => row.map((b) => b.text));
+    const [first] = renderStuckCard(notice(task, { reason: 'depends on cancelled #3' }), e);
+    expect(texts(first!)).toEqual([['Cancel Task']]);
+    expect(String(first!.payload.params['text']).endsWith(STUCK_FOOTER)).toBe(true);
+    e.store.enqueueOutbox(-1, [first!], null, NOW);
+    const [restored] = renderStuckCard(notice(task, { mode: 'restore' }), e);
+    expect(texts(restored!)).toEqual([['Cancel Task']]);
+  });
 });

@@ -303,11 +303,26 @@ describe('Iteration Budget (AD-3)', () => {
   });
 
   it('a Triage entered any other way applies rerun and parked as drawn', () => {
-    for (const cause of ['nonblocking_findings', 'implementer_blocked', undefined]) {
+    for (const cause of ['nonblocking_findings', undefined]) {
       const other = ctx({ triageCause: () => cause });
       expect(applied(transition(task('triage'), stage('triage'), sample('rerun'), other)).next).toBe('implementing');
       expect(applied(transition(task('triage'), stage('triage'), sample('parked'), other)).next).toBe('evidencing');
     }
+  });
+
+  it('a Triage entered by implementer_blocked applies parked as reason_written; rerun stays drawn (AD-3, 2026-11-22)', () => {
+    const blocked = ctx({ triageCause: () => 'implementer_blocked' });
+    const parked = applied(transition(task('triage'), stage('triage'), { type: 'parked', stage_id: CURRENT, reason: 'needs the API key' }, blocked));
+    expect(parked.next).toBe('stuck');
+    expect(parked.patch.stuck_reason).toBe('needs the API key');
+    expect(parked.effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { reason: 'needs the API key' } }]);
+    expect(applied(transition(task('triage'), stage('triage'), sample('rerun'), blocked)).next).toBe('implementing');
+  });
+
+  it('budget_raised on a Task stuck by deps_unsatisfiable is ignored as invalid (AD-3, 2026-11-22)', () => {
+    const stuck = task('stuck', { budget_used: 1, budget_limit: 5, stuck_reason: 'depends on cancelled #3' });
+    expect(transition(stuck, undefined, { type: 'budget_raised', amount: 2 }, ctx({ stuckCause: () => 'deps_unsatisfiable' }))).toEqual({ ignored: 'invalid' });
+    expect(applied(transition(stuck, undefined, { type: 'budget_raised', amount: 2 }, ctx({ stuckCause: () => 'reason_written' }))).next).toBe('implementing');
   });
 
   it('rerun on a spent budget re-enters Triage once through budget_spent; that Triage ends at stuck', () => {

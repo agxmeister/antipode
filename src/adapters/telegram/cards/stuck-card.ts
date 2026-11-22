@@ -1,5 +1,5 @@
 import { STUCK_CARD } from '../../../core/coordinator/transitions.ts';
-import { lapsOf } from '../../../core/domain/loop.ts';
+import { lapsOf, stuckCause } from '../../../core/domain/loop.ts';
 import type { Task } from '../../../core/domain/task.ts';
 import type { OutboxDraft } from '../../../core/domain/telegram.ts';
 import { clip, escapeHtml, keyboard, NO_KEYBOARD, textMessage, visibleLength, TEXT_LIMIT, type CardEnv, type InlineKeyboard } from './card.ts';
@@ -30,14 +30,11 @@ function title(task: Task): string {
   return line(task.title ?? (task.kind === 'bootstrap' ? 'Bootstrap' : 'Untitled'), TITLE_MAX);
 }
 
-/** Row 1: `Raise budget +2` · `Cancel Task`. */
+/** Row 1: `Raise budget +2` · `Cancel Task`; `Cancel Task` alone when stuck on dependencies, which no budget helps (AD-3). */
 function stuckKeyboard(task: Task, env: CardEnv): InlineKeyboard {
-  return keyboard(env, [
-    [
-      { text: `Raise budget +${RAISE_AMOUNT}`, command: RAISE_BUDGET, task_id: task.id, args: { amount: RAISE_AMOUNT } },
-      { text: 'Cancel Task', command: CANCEL_TASK, task_id: task.id },
-    ],
-  ]);
+  const cancel = { text: 'Cancel Task', command: CANCEL_TASK, task_id: task.id };
+  if (stuckCause(env.store.stageEventsOfTask(task.id)) === 'deps_unsatisfiable') return keyboard(env, [[cancel]]);
+  return keyboard(env, [[{ text: `Raise budget +${RAISE_AMOUNT}`, command: RAISE_BUDGET, task_id: task.id, args: { amount: RAISE_AMOUNT } }, cancel]]);
 }
 
 /** After `Cancel Task`: `Confirm cancel #n` · `Keep`. */

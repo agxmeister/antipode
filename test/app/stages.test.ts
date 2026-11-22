@@ -523,6 +523,7 @@ describe('renderLoopBrief (AD-21, CAP-19)', () => {
     parked: [{ id: 'x', task_id: 't', p_no: 1, criterion_id: 'AC1', note: 'the beep is quiet', status: 'open', source_stage_id: null, created_at: '2026-11-20T12:00:00.000Z' }],
     budget: { used: 2, limit: 3 },
     budgetSpent: false,
+    blocked: false,
     lastLap: { implementer: { status: 'done', summary: 'added it' }, blocking: [], nonblocking: [], triageReason: 'try a timer service' },
   };
 
@@ -541,6 +542,11 @@ describe('renderLoopBrief (AD-21, CAP-19)', () => {
     expect(triage).toContain('- Lap 1 (done): added it');
     expect(triage).toContain('Iteration Budget: 2/3 used.');
     expect(triage).toContain('The Iteration Budget is spent');
+  });
+
+  it('a Triage on a blocked Implementer is told a park stops the Task; others are not (2026-11-22)', () => {
+    expect(renderLoopBrief({ ...base, role: 'triage', blocked: true })).toContain('choose `rerun` or `stuck`');
+    expect(renderLoopBrief({ ...base, role: 'triage' })).not.toContain('choose `rerun` or `stuck`');
   });
 
   it('Triage sees the blocking findings and the failed test; the Implementer after a blocked lap sees the blocker', () => {

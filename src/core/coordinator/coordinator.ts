@@ -1,7 +1,7 @@
 import type { Effect, EffectRow } from '../domain/effects.ts';
 import { AntipodError } from '../domain/errors.ts';
 import { stageIdOf, type CreationEventType, type Event, type IgnoreReason } from '../domain/events.ts';
-import { triageCause } from '../domain/loop.ts';
+import { stuckCause, triageCause } from '../domain/loop.ts';
 import type { EvidenceKind } from '../domain/recipe.ts';
 import { ulid } from '../domain/ids.ts';
 import type { Clock } from '../ports/clock.ts';
@@ -429,6 +429,7 @@ export class Coordinator {
       approvalRefusal: (event) => approvalRefusal(this.#store, task, event.evidence_kinds),
       hasContract: () => this.#store.latestContract(task.id) !== undefined,
       triageCause: () => triageCause(this.#store.stageEventsOfTask(task.id)),
+      stuckCause: () => stuckCause(this.#store.stageEventsOfTask(task.id)),
     };
   }
 

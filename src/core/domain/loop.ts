@@ -124,10 +124,23 @@ export function lastLapOf(stages: readonly Stage[], current?: string): LastLap |
  * `budget_spent` means the Triage decides on a spent budget (AD-3).
  */
 export function triageCause(events: readonly StageEventRow[]): string | undefined {
+  return enteredBy(events, 'triage');
+}
+
+/**
+ * The event that entered the Task's current `stuck` visit, skipping a return from `paused`.
+ * `deps_unsatisfiable` means no budget can help: no `Raise budget +2`, no `budget_raised` (AD-3).
+ */
+export function stuckCause(events: readonly StageEventRow[]): string | undefined {
+  return enteredBy(events, 'stuck');
+}
+
+/** The newest applied event into `state` from another state, skipping Stage retries and a resume from `paused`. */
+function enteredBy(events: readonly StageEventRow[], state: string): string | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     const row = events[i]!;
-    if (row.status !== 'applied' || row.to_state !== 'triage') continue;
-    if (row.from_state === 'triage' || row.from_state === 'paused') continue;
+    if (row.status !== 'applied' || row.to_state !== state) continue;
+    if (row.from_state === state || row.from_state === 'paused') continue;
     return row.event_type;
   }
   return undefined;
