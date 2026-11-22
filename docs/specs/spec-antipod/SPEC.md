@@ -75,7 +75,7 @@ A pain and an opportunity. The Owner (agxmeister) has personal software projects
 
 - **CAP-13** Validation routing and Iteration Budget (FR-13)
   - **intent:** The Coordinator routes each validated Task by outcome, and one Iteration Budget bounds every Implementer run whatever caused it.
-  - **success:** Blocking findings return the Task to the Implementer; non-blocking findings and a blocked Implementer go to Triage, which reruns, parks or writes the Stuck reason; a pass goes to evidencing. Implementer runs caused by findings, Triage, failed tests, missing or rejected Evidence or Integration rework each use one budget unit; Corrections, retries, resumes and amendments never do. A spent budget produces a Stuck card with Triage's one-line reason, up to three attempts and the last Evidence. Triage always runs in a fresh session.
+  - **success:** Blocking findings return the Task to the Implementer; non-blocking findings and a blocked Implementer go to Triage, which reruns, parks or writes the Stuck reason (after a blocked Implementer, a park becomes the Stuck reason; on a spent budget, every decision does); a pass goes to evidencing. Implementer runs caused by findings, Triage, failed tests, missing or rejected Evidence or Integration rework each use one budget unit; Corrections, retries, resumes and amendments never do. A spent budget produces a Stuck card with Triage's one-line reason, up to three attempts and the last Evidence. Triage always runs in a fresh session.
 
 - **CAP-14** Owner controls (FR-14)
   - **intent:** The Owner can pause, resume or cancel any Task or Project at any time and edit any Task's contract.
@@ -135,7 +135,7 @@ A pain and an opportunity. The Owner (agxmeister) has personal software projects
 
 - **CAP-28** Correction, Progress Peek, status and Stuck replies (FR-28)
   - **intent:** The Owner can request changes by text or voice, peek at a running Task without interrupting it, list Tasks and their states, and answer a Stuck card.
-  - **success:** A Correction returns the same Task to the Implementer on the same Branch with the note and previous Evidence in context, no new contract and no budget use. `/peek` answers with the latest visual and `Role · status · lap n/budget · elapsed`, never interrupts a Stage. `/status` groups Needs you / Running / Queued / Done and ends with an `Elsewhere:` line. A Stuck card offers `Raise budget +2` and `Cancel Task`, and free replies go through Intake. Every Task-scoped action resolves by reply target, explicit id, or candidate buttons.
+  - **success:** A Correction returns the same Task to the Implementer on the same Branch with the note and previous Evidence in context, no new contract and no budget use. `/peek` answers with the latest visual and `Role · status · lap n/budget · elapsed`, never interrupts a Stage. `/status` groups Needs you / Running / Queued / Done and ends with an `Elsewhere:` line. A Stuck card offers `Raise budget +2` and `Cancel Task` (only `Cancel Task` when the Task is stuck on dependencies), and free replies go through Intake. Every Task-scoped action resolves by reply target, explicit id, or candidate buttons.
 
 - **CAP-29** Integration after Accept (FR-29)
   - **intent:** After Accept the Task is rebased on `main`, re-tested and re-validated, then merged by fast-forward.

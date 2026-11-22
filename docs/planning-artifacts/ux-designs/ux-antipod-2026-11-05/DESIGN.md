@@ -153,7 +153,7 @@ Each card lists its blocks top to bottom. "Buttons" are inline-keyboard rows; on
   1. Title `{components.stuck-card.titlePattern}`.
   2. Triage reason (one line).
   3. Up to 3 lines of attempts, `Lap ${n}: ${what}`.
-  4. Buttons. Row 1: `Raise budget +2` · `Cancel Task`.
+  4. Buttons. Row 1: `Raise budget +2` · `Cancel Task`. A Task stuck on unsatisfiable dependencies gets `Cancel Task` alone.
   5. Footer: `Or reply to amend or drop a criterion.`
 - **Correction prompt.** A single line `What should change on #${task-id}?`, sent as a force-reply. No buttons.
 - **Peek reply.** The latest visual, with the caption `{components.peek-reply.captionPattern}`. If there are no visuals yet, the same line is sent as text.
