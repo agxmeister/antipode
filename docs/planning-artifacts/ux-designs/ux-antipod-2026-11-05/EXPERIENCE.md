@@ -139,7 +139,7 @@ Behavioral rules only. Visual specs are in `DESIGN.md` → Components.
 | Demo preview asleep `[POST-MVP]` | Demo link | The link wakes the preview (FR-24). If the wake takes more than a few seconds, the bot replies `Waking preview · ~30 s`. |
 | Evidence send failed | None, then notice | Retried silently. After the retry limit, a loud `❌ #${id} Review couldn't be delivered: ${reason}`, followed by `/evidence ${id}` once it is fixed. |
 | Unanswered Correction prompt | Force-reply | Nothing happens; the Task stays in review. The next free text that replies to the prompt is the Correction. |
-| Stale button | Toast | Tapping a button on an outdated card: `This Review was replaced by a newer one.` The bot then replies to the newer card. |
+| Stale button | Toast | Tapping a button on an outdated Review card: `This Review was replaced by a newer one.` The bot then replies to the newer card. On any other card, a button that can no longer act answers with where the Task is now, `#${id} is ${state} now.` (`This draft is ${state} now.` before approval), and the tapped card is edited to its current state. |
 
 ## Interaction Primitives
 

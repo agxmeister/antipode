@@ -155,6 +155,7 @@ Each card lists its blocks top to bottom. "Buttons" are inline-keyboard rows; on
   3. Up to 3 lines of attempts, `Lap ${n}: ${what}`.
   4. Buttons. Row 1: `Raise budget +2` · `Cancel Task`. A Task stuck on unsatisfiable dependencies gets `Cancel Task` alone.
   5. Footer: `Or reply to amend or drop a criterion.`
+  6. When the Task leaves `stuck`, the buttons and footer are replaced by a state line: `⏳ Budget +2 · resuming`, `Cancelled`, `⏸ Paused by you` or `⏳ Amended · resuming`. Only the newest Stuck card of a Task has buttons; `resume` sends a new one.
 - **Correction prompt.** A single line `What should change on #${task-id}?`, sent as a force-reply. No buttons.
 - **Peek reply.** The latest visual, with the caption `{components.peek-reply.captionPattern}`. If there are no visuals yet, the same line is sent as text.
 - **Status list.** Blocks with bold headers: **Needs you**, **Running**, **Queued**, **Done** (last 5). One line per Task: `${glyph} #${id} ${title} · ${state}`. Every line in Needs you is a message link to its card. The list ends with `Elsewhere: …`.
