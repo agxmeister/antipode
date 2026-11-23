@@ -51,6 +51,8 @@ function confirmKeyboard(task: Task, env: CardEnv): InlineKeyboard {
 function stateLine(payload: Record<string, unknown>): string | undefined {
   if (payload['closed'] === 'raised') return `⏳ Budget +${typeof payload['amount'] === 'number' ? payload['amount'] : RAISE_AMOUNT} · resuming`;
   if (payload['closed'] === 'cancelled') return 'Cancelled';
+  if (payload['closed'] === 'paused') return '⏸ Paused by you';
+  if (payload['closed'] === 'amended') return '⏳ Amended · resuming';
   return undefined;
 }
 

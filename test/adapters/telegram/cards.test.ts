@@ -161,6 +161,11 @@ describe('Stuck card (DESIGN stuck-card)', () => {
     expect(raised!.payload.params['reply_markup']).toEqual({ inline_keyboard: [] });
     const [cancelled] = renderStuckCard(notice(task, { closed: 'cancelled' }), e);
     expect(String(cancelled!.payload.params['text']).endsWith('Lap 4: fourth try\n\nCancelled')).toBe(true);
+    const [paused] = renderStuckCard(notice(task, { closed: 'paused' }), e);
+    expect(String(paused!.payload.params['text']).endsWith('Lap 4: fourth try\n\n⏸ Paused by you')).toBe(true);
+    expect(paused!.payload.params['reply_markup']).toEqual({ inline_keyboard: [] });
+    const [amended] = renderStuckCard(notice(task, { closed: 'amended' }), e);
+    expect(String(amended!.payload.params['text']).endsWith('Lap 4: fourth try\n\n⏳ Amended · resuming')).toBe(true);
   });
 
   it('stuck on unsatisfiable dependencies: Cancel Task alone, also when Keep restores the buttons (2026-11-22)', () => {

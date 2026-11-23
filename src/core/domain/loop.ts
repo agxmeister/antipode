@@ -135,6 +135,26 @@ export function stuckCause(events: readonly StageEventRow[]): string | undefined
   return enteredBy(events, 'stuck');
 }
 
+/**
+ * The event that ended the Task's latest `stuck` visit, for a Task that is no longer stuck: the newest
+ * applied event out of `stuck`, or, when that was `pause`, the event that then ended the pause.
+ */
+export function stuckExit(events: readonly StageEventRow[]): StageEventRow | undefined {
+  let pausedExit: StageEventRow | undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const row = events[i]!;
+    if (row.status !== 'applied' || row.from_state === row.to_state) continue;
+    if (row.from_state === 'paused') {
+      pausedExit = row;
+    } else if (row.from_state === 'stuck') {
+      return row.to_state === 'paused' && pausedExit !== undefined && pausedExit.to_state !== 'stuck' ? pausedExit : row;
+    } else if (row.to_state === 'paused') {
+      pausedExit = undefined;
+    }
+  }
+  return undefined;
+}
+
 /** The newest applied event into `state` from another state, skipping Stage retries and a resume from `paused`. */
 function enteredBy(events: readonly StageEventRow[], state: string): string | undefined {
   for (let i = events.length - 1; i >= 0; i--) {

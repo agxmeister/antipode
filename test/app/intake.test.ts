@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { bootDaemon, type Daemon } from '../../src/app/daemon.ts';
 import { TOAST } from '../../src/app/intake.ts';
-import { STALE_TAP_TOAST } from '../../src/adapters/telegram/poller.ts';
+import { stateToast } from '../../src/adapters/telegram/poller.ts';
 import { INTAKE_FAILED_REPLY } from '../../src/adapters/telegram/messenger.ts';
 import { projectContract } from '../../src/core/domain/contract.ts';
 import { ulid } from '../../src/core/domain/ids.ts';
@@ -178,17 +178,22 @@ describe('Intake drafts from Owner text (CAP-7, CAP-8, CAP-9)', () => {
     expect(h.card()['text']).not.toContain('Approve after');
     expect(rows(h)).toEqual([['Approve', 'Discard']]);
 
-    // A stale quick answer (Q1 is answered) is refused with a toast and changes nothing.
+    // A stale quick answer (Q1 is answered) is refused with the draft's state and changes nothing.
     const yes = h.daemon.store.outboxOfChat(CHAT_ID).find((row) => row.payload.method === 'sendMessage' && row.kind === 'draft_card');
     const staleData = (yes!.payload.params['reply_markup'] as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> }).inline_keyboard[0]![0]!.callback_data;
     h.push((id) => tapUpdate(id, staleData, { messageId: cardMessageId(h) }));
     await vi.waitFor(() => expect(toasts(h)).toHaveLength(2));
-    expect(toasts(h)[1]).toBe(STALE_TAP_TOAST);
+    expect(toasts(h)[1]).toBe(stateToast(h.daemon.store.getTask(task.id)!));
+    expect(toasts(h)[1]).toBe('This draft is awaiting approval now.');
     expect(h.daemon.store.questionsOf(task.id)[0]!.answer).toBe('Not yet');
+    // The tapped card is redrawn from the rows: the same text and buttons.
+    await vi.waitFor(() => expect(h.edits()).toHaveLength(2));
+    expect(h.card()['text']).toContain('Q1 Can the default be changed per exercise? · Not yet');
+    expect(rows(h)).toEqual([['Approve', 'Discard']]);
 
     h.tap('Approve');
     await vi.waitFor(() => expect(h.daemon.store.getTask(task.id)?.state).toBe('queued'));
-    await vi.waitFor(() => expect(h.edits()).toHaveLength(2));
+    await vi.waitFor(() => expect(h.edits()).toHaveLength(3));
     expect(toasts(h)[2]).toBe(TOAST.queued);
     const approved = h.daemon.store.getTask(task.id)!;
     expect(approved).toMatchObject({ task_no: 1, budget_used: 0, config_sha: h.remote.sha('main') });

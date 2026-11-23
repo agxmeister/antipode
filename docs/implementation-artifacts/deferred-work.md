@@ -65,9 +65,17 @@
 - source_spec: `docs/implementation-artifacts/spec-1-9-implement-validate-and-triage-loop.md`
   summary: Close the Stuck card with a state line when the Task leaves `stuck` by `amended`, once replies reach Intake (1-14).
   evidence: `enter()` closes the card only for `budget_raised` and `cancel`; an amend leaves live buttons that answer with the stale toast (review pass 1, #12).
+  resolved: Sprint Change Proposal 2026-11-23, implemented in `docs/implementation-artifacts/spec-1-9-stale-taps.md`.
 - source_spec: `docs/implementation-artifacts/spec-1-9-implement-validate-and-triage-loop.md`
   summary: Stop parking the same non-blocking finding again every lap, and tie `parking_lot.criterion_id` to a real criterion before promotion (1-17).
   evidence: `insertParkedFindings` does no dedupe, the Validator brief does not list open parked findings, and `criterion_id` is the Validator's free-text label (review pass 1, #13, #14).
 - source_spec: `docs/implementation-artifacts/spec-1-9-stuck-by-cause.md`
   summary: Give refused or stale taps on the Stuck card their own toast instead of `STALE_TAP_TOAST` ("This Review was replaced by a newer one.").
   evidence: `src/app/stuck.ts` answers every non-applied Stuck card tap with the Review wording from `poller.ts:15`; EXPERIENCE.md has no Stuck card stale copy, so the text needs an Owner/UX decision.
+  resolved: Sprint Change Proposal 2026-11-23, implemented in `docs/implementation-artifacts/spec-1-9-stale-taps.md`.
+- source_spec: `docs/implementation-artifacts/spec-1-9-stale-taps.md`
+  summary: Decide Owner-facing words for raw Task states in the stale-tap toast, e.g. `This draft is draft now.` for a tap while Intake revises a draft.
+  evidence: `stateToast` (`poller.ts`) prints the state identifier with `_` as spaces, as EXPERIENCE.md's `${state}` pattern says; some states read badly and the UX docs have no state wording table, so the copy needs an Owner/UX decision.
+- source_spec: `docs/implementation-artifacts/spec-1-9-stale-taps.md`
+  summary: Redraw an older card's text on a stale tap, not only remove its buttons, if the Owner wants it "edited to its current state" in full.
+  evidence: `#staleAnswer` strips the keyboard of a card that is not the Task's newest; its text (e.g. a Stuck card whose close edit failed) keeps the reason and footer. Rare: it needs a failed close edit. EXPERIENCE.md says the tapped card is edited to its current state.

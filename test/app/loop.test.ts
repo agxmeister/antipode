@@ -1,7 +1,6 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { STALE_TAP_TOAST } from '../../src/adapters/telegram/poller.ts';
 import { STUCK_FOOTER } from '../../src/adapters/telegram/cards/stuck-card.ts';
 import { bootDaemon, type Daemon } from '../../src/app/daemon.ts';
 import { STUCK_TOAST } from '../../src/app/stuck.ts';
@@ -319,8 +318,40 @@ describe('the implement, validate and triage loop (CAP-13, CAP-19, CAP-20)', () 
 
     updateId += 1;
     h.tg.pushUpdates(tapUpdate(updateId, keep.callback_data, { messageId: 1 }));
-    await vi.waitFor(() => expect(h.toasts().at(-1)).toBe(STALE_TAP_TOAST));
+    await vi.waitFor(() => expect(h.toasts().at(-1)).toBe(`#${h.task.task_no} is cancelled now.`));
     expect(h.toasts().filter((toast) => toast === STUCK_TOAST.cancelled)).toHaveLength(1);
+  });
+
+  it('pause closes the Stuck card; resume sends a new one, and the old card no longer acts', async () => {
+    const h = await harness([done('added the timer'), verdict('nonblocking', [{ criterion_id: 'AC2', blocking: false, note: 'shows 60 s' }]), triage('stuck', 'the Owner must pick the default')]);
+    await h.start();
+    await vi.waitFor(() => expect(h.stuckSends()).toHaveLength(1), { timeout: 15_000 });
+    await vi.waitFor(() => expect(h.buttons()).toEqual(['Raise budget +2', 'Cancel Task']));
+    const raise = (h.stuckCard()['reply_markup'] as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> }).inline_keyboard[0]![0]!;
+    const oldCard = h.daemon.store.outboxOfChat(CHAT_ID).filter((row) => row.kind === 'stuck_card' && row.payload.method === 'sendMessage')[0]!;
+
+    await h.daemon.coordinator.applyEvent(h.task.id, { type: 'pause' });
+    await vi.waitFor(() => expect(h.buttons()).toEqual([]));
+    expect(String(h.stuckCard()['text']).endsWith('\n\n⏸ Paused by you')).toBe(true);
+    expect(String(h.stuckCard()['text'])).not.toContain(STUCK_FOOTER);
+
+    await h.daemon.coordinator.applyEvent(h.task.id, { type: 'resume' });
+    await vi.waitFor(() => expect(h.stuckSends()).toHaveLength(2));
+    await vi.waitFor(() => expect(h.buttons()).toEqual(['Raise budget +2', 'Cancel Task']));
+    const budget = h.daemon.store.getTask(h.task.id)!.budget_limit;
+
+    // The old card's button (as if its close never reached Telegram) acts on nothing.
+    updateId += 1;
+    h.tg.pushUpdates(tapUpdate(updateId, raise.callback_data, { messageId: oldCard.sent_message_id! }));
+    await vi.waitFor(() => expect(h.toasts().at(-1)).toBe(`#${h.task.task_no} is stuck now.`));
+    expect(h.stateOf()).toBe('stuck');
+    expect(h.daemon.store.getTask(h.task.id)!.budget_limit).toBe(budget);
+    await vi.waitFor(() =>
+      expect(h.daemon.store.outboxOfChat(CHAT_ID).filter((row) => row.kind === 'stale_tap_retire')).toEqual([
+        expect.objectContaining({ target_message_id: oldCard.sent_message_id, payload: { method: 'editMessageReplyMarkup', params: { reply_markup: { inline_keyboard: [] } } } }),
+      ]),
+    );
+    expect(h.buttons()).toEqual(['Raise budget +2', 'Cancel Task']);
   });
 
   it('a push the remote rejects fails testing without budget, is retried, then the Stuck card names the cause', async () => {

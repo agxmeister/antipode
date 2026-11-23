@@ -41,10 +41,12 @@ export const DRAFT_CARD = 'draft_card';
 export const INTAKE_FAILED = 'intake_failed';
 /**
  * The loud Stuck card (DESIGN `stuck-card`), sent on every entry to `stuck` with payload `{reason}`.
- * Later renders edit that card: `{mode: 'confirm' | 'restore'}` swaps its buttons, `{closed: 'raised', amount}`
- * and `{closed: 'cancelled'}` replace them with a state line.
+ * Later renders edit that card: `{mode: 'confirm' | 'restore'}` swaps its buttons, `{closed: 'raised', amount}`,
+ * `{closed: 'cancelled' | 'paused' | 'amended'}` replace them with a state line.
  */
 export const STUCK_CARD = 'stuck_card';
+/** The Stuck card's state line by the event that ended its visit (DESIGN `stuck-card` item 6). */
+export const STUCK_CLOSES: Readonly<Record<string, string>> = { budget_raised: 'raised', cancel: 'cancelled', pause: 'paused', amended: 'amended' };
 /** `stuck_reason` of a spent budget whose Triage gave no reason. */
 export const BUDGET_SPENT_REASON = 'Iteration Budget spent';
 
@@ -139,11 +141,13 @@ function enter(next: TaskState, task: Task, stage: Stage | undefined, ctx: Trans
   // A paused Stuck Task keeps its reason, so `resume` re-sends the card with it.
   if (next !== 'stuck' && !(next === 'paused' && task.state === 'stuck')) patch.stuck_reason = null;
   if (next !== 'queued') patch.waiting_reason = null;
-  // Leaving `stuck` by the card's buttons closes the card with a state line (DESIGN `stuck-card`).
-  if (task.state === 'stuck' && opts.cause === 'budget_raised') {
-    effects.push({ kind: 'notify', notice_kind: STUCK_CARD, task_id: task.id, payload: { closed: 'raised', amount: (patch.budget_limit ?? task.budget_limit) - task.budget_limit } });
-  } else if (task.state === 'stuck' && opts.cause === 'cancel') {
-    effects.push({ kind: 'notify', notice_kind: STUCK_CARD, task_id: task.id, payload: { closed: 'cancelled' } });
+  // Every exit from `stuck` closes the card with a state line (DESIGN `stuck-card` item 6), and so does
+  // ending a paused stuck visit by `cancel` or `amended`: the card still reads `⏸ Paused by you`.
+  const closes = task.state === 'stuck' || (task.state === 'paused' && task.resume_state === 'stuck' && opts.cause !== 'resume');
+  const closed = closes ? STUCK_CLOSES[opts.cause] : undefined;
+  if (closed !== undefined) {
+    const amount = closed === 'raised' ? { amount: (patch.budget_limit ?? task.budget_limit) - task.budget_limit } : {};
+    effects.push({ kind: 'notify', notice_kind: STUCK_CARD, task_id: task.id, payload: { closed, ...amount } });
   }
 
   const role = STAGE_ROLES[next];

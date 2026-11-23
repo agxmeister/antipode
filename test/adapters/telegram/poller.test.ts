@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TelegramMessenger } from '../../../src/adapters/telegram/messenger.ts';
-import { parseCommand, Poller, STALE_TAP_TOAST, type CallbackCommand, type CommandInput, type InboundMessage } from '../../../src/adapters/telegram/poller.ts';
+import { parseCommand, Poller, STALE_TAP_TOAST, stateToast, type CallbackCommand, type CommandInput, type InboundMessage } from '../../../src/adapters/telegram/poller.ts';
 import { ulid } from '../../../src/core/domain/ids.ts';
 import { LAST_UPDATE_ID_SETTING, type OutboxDraft } from '../../../src/core/domain/telegram.ts';
 import { fakeClock, type FakeClock } from '../../helpers/clock.ts';
@@ -380,5 +380,81 @@ describe('Poller: handler failures reach the Owner (Owner decision 2026-11-12)',
     expect(tg.callsOf('sendMessage')).toEqual([
       expect.objectContaining({ text: "❌ Couldn't handle that: boom &lt;now&gt;", reply_parameters: { message_id: 602, allow_sending_without_reply: true } }),
     ]);
+  });
+});
+
+describe('Poller: stale answers of non-Review cards (EXPERIENCE.md → Stale button)', () => {
+  function setupStuck(h: Harness, state: 'stuck' | 'implementing', options: { refuse?: boolean; redraws?: boolean } = {}) {
+    const project = insertProject(h.ts.store, CHAT_ID);
+    const task = insertTask(h.ts.store, project.id, { state });
+    const handled: string[] = [];
+    const redrawn: string[] = [];
+    h.poller.callbacks.set('raise_budget', {
+      states: ['stuck'],
+      newestCardOnly: true,
+      stale: { redraw: (t) => redrawn.push(t.state) > 0 && options.redraws !== false },
+      handle: ({ callback }) => {
+        handled.push(callback.id);
+        return options.refuse === true ? { stale: true } : { toast: 'Budget +2. Resuming.' };
+      },
+    });
+    const id = ulid();
+    h.ts.store.insertCallback({ id, command: 'raise_budget', task_id: task.id, round: null, args: {}, expires_at: null, created_at: NOW });
+    return { task, handled, redrawn, data: `cb:${id}` };
+  }
+
+  it('names the Task state and its card is redrawn when the tapped card is the newest', async () => {
+    const h = harness();
+    const { task, handled, redrawn, data } = setupStuck(h, 'implementing');
+    h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 40, task_id: task.id, round: null, kind: 'stuck_card' });
+    await h.poller.handleUpdate(tapUpdate(200, data, { messageId: 40 }));
+    expect(handled).toEqual([]);
+    expect(h.tg.callsOf('answerCallbackQuery')).toEqual([{ callback_query_id: 'q200', text: '#3 is implementing now.' }]);
+    expect(redrawn).toEqual(['implementing']);
+    // No reply pointing elsewhere: the card itself is put right.
+    expect(h.replies).toEqual([]);
+  });
+
+  it('an older card of a stuck Task does not act: its buttons are removed', async () => {
+    const h = harness();
+    const { task, handled, redrawn, data } = setupStuck(h, 'stuck');
+    h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 40, task_id: task.id, round: null, kind: 'stuck_card' });
+    h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 41, task_id: task.id, round: null, kind: 'stuck_card' });
+    await h.poller.handleUpdate(tapUpdate(210, data, { messageId: 40 }));
+    expect(handled).toEqual([]);
+    expect(redrawn).toEqual([]);
+    expect(h.tg.callsOf('answerCallbackQuery')).toEqual([{ callback_query_id: 'q210', text: '#3 is stuck now.' }]);
+    expect(h.replies).toEqual([
+      {
+        chatId: CHAT_ID,
+        drafts: [{ kind: 'stale_tap_retire', task_id: task.id, target_message_id: 40, payload: { method: 'editMessageReplyMarkup', params: { reply_markup: { inline_keyboard: [] } } } }],
+      },
+    ]);
+    // The newest card acts.
+    await h.poller.handleUpdate(tapUpdate(211, data, { messageId: 41 }));
+    expect(handled).toHaveLength(1);
+  });
+
+  it('a handler refusal gets the same answer, from the Task as it is after the handler', async () => {
+    const h = harness();
+    const { task, redrawn, data } = setupStuck(h, 'stuck', { refuse: true });
+    h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 40, task_id: task.id, round: null, kind: 'stuck_card' });
+    await h.poller.handleUpdate(tapUpdate(220, data, { messageId: 40 }));
+    expect(h.tg.callsOf('answerCallbackQuery')).toEqual([{ callback_query_id: 'q220', text: '#3 is stuck now.' }]);
+    expect(redrawn).toEqual(['stuck']);
+  });
+
+  it('a newest card that cannot be redrawn loses its buttons', async () => {
+    const h = harness();
+    const { task, redrawn, data } = setupStuck(h, 'implementing', { redraws: false });
+    h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 40, task_id: task.id, round: null, kind: 'stuck_card' });
+    await h.poller.handleUpdate(tapUpdate(230, data, { messageId: 40 }));
+    expect(redrawn).toEqual(['implementing']);
+    expect(h.replies).toEqual([{ chatId: CHAT_ID, drafts: [expect.objectContaining({ kind: 'stale_tap_retire', target_message_id: 40 })] }]);
+  });
+
+  it('an unnumbered draft is named as a draft', () => {
+    expect(stateToast({ task_no: null, state: 'discard_pending' } as never)).toBe('This draft is discard pending now.');
+    expect(stateToast({ task_no: 12, state: 'waiting_on_dependencies' } as never)).toBe('#12 is waiting on dependencies now.');
   });
 });

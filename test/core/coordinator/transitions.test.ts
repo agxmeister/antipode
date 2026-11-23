@@ -420,11 +420,24 @@ describe('the Stuck card (CAP-13)', () => {
     expect(resumed.effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { reason: 'needs the Owner' } }]);
   });
 
-  it('cancel from stuck closes the card; cancel elsewhere and pause from stuck do not touch it', () => {
-    const cancelled = applied(transition(task('stuck', { current_stage_id: null, stuck_reason: 'x' }), undefined, sample('cancel'), ctx()));
-    expect(cancelled.effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { closed: 'cancelled' } }]);
+  it('every exit from stuck closes the card with its state line; leaving other states does not touch it', () => {
+    const close = (closed: string) => [{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { closed } }];
+    const stuck = task('stuck', { current_stage_id: null, stuck_reason: 'x' });
+    expect(applied(transition(stuck, undefined, sample('cancel'), ctx())).effects).toEqual(close('cancelled'));
+    expect(applied(transition(stuck, undefined, sample('pause'), ctx())).effects).toEqual(close('paused'));
+    expect(applied(transition(stuck, undefined, sample('amended'), ctx())).effects.filter((e) => e.kind === 'notify')).toEqual(close('amended'));
     expect(applied(transition(task('queued', { current_stage_id: null }), undefined, sample('cancel'), ctx())).effects).toEqual([]);
-    expect(applied(transition(task('stuck', { current_stage_id: null }), undefined, sample('pause'), ctx())).effects).toEqual([]);
+  });
+
+  it('ending a paused stuck visit by cancel or amended closes the card again; resume sends a new card', () => {
+    const paused = task('paused', { current_stage_id: null, resume_state: 'stuck', stuck_reason: 'x' });
+    expect(applied(transition(paused, undefined, sample('cancel'), ctx())).effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { closed: 'cancelled' } }]);
+    expect(applied(transition(paused, undefined, sample('amended'), ctx())).effects.filter((e) => e.kind === 'notify')).toEqual([
+      { kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { closed: 'amended' } },
+    ]);
+    expect(applied(transition(paused, undefined, sample('resume'), ctx())).effects).toEqual([{ kind: 'notify', notice_kind: STUCK_CARD, task_id: 'task-1', payload: { reason: 'x' } }]);
+    const pausedElsewhere = task('paused', { current_stage_id: null, resume_state: 'implementing' });
+    expect(applied(transition(pausedElsewhere, undefined, sample('cancel'), ctx())).effects).toEqual([]);
   });
 
   it('implementer_blocked ends the Implementer succeeded and starts Triage with no budget unit and no test', () => {

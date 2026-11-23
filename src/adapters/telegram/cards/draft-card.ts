@@ -92,6 +92,8 @@ export function renderDraftCard(input: NoticeInput, env: CardEnv): OutboxDraft[]
   const closed = typeof payload['closed'] === 'string' ? payload['closed'] : undefined;
   const refusal = typeof payload['refusal'] === 'string' ? payload['refusal'] : undefined;
   if (contract === undefined || task.state === 'draft') return [];
+  // A later card (a Stuck card) is never overwritten with the draft, e.g. by a stale tap's redraw.
+  if (previous !== undefined && previous.kind !== DRAFT_CARD) return [];
   const isOpen = task.state === 'awaiting_approval';
   const isPending = task.state === 'discard_pending';
   const isClosed = task.state === 'cancelled';

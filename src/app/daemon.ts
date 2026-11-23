@@ -214,7 +214,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       // Untargeted Owner text and replies to a Draft card go to Intake; its buttons are Coordinator commands (AD-9).
       telegram.onText((input) => draftIntake.onText(input));
       for (const [command, definition] of draftIntake.callbacks()) telegram.registerCallback(command, definition);
-      for (const [command, definition] of stuckCallbacks(coordinator)) telegram.registerCallback(command, definition);
+      for (const [command, definition] of stuckCallbacks(coordinator, store)) telegram.registerCallback(command, definition);
       executor.register('notify', (effect, row) => telegram.notify(effect, row));
       executor.register('back_online', (effect, row) => telegram.backOnline(effect, row));
       executor.register('retire_card', (effect, row) => telegram.retireCard(effect, row));

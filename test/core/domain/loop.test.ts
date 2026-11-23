@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StageEventRow } from '../../../src/core/domain/events.ts';
-import { lapsOf, lastLapOf, stuckCause, triageCause } from '../../../src/core/domain/loop.ts';
+import { lapsOf, lastLapOf, stuckCause, stuckExit, triageCause } from '../../../src/core/domain/loop.ts';
 import type { Stage } from '../../../src/core/domain/stage.ts';
 
 const AT = '2026-11-20T12:00:00.000Z';
@@ -55,5 +55,23 @@ describe('loop rows (AD-21)', () => {
     expect(stuckCause([event('deps_unsatisfiable', 'waiting_on_dependencies', 'stuck'), event('cancel', 'stuck', 'cancelled')])).toBe('deps_unsatisfiable');
     expect(stuckCause([event('stage_retries_exhausted', 'testing', 'stuck')])).toBe('stage_retries_exhausted');
     expect(stuckCause([])).toBeUndefined();
+  });
+
+  it('stuckExit is the event that ended the latest stuck visit, through a pause', () => {
+    const into = event('reason_written', 'triage', 'stuck');
+    const exit = (rows: StageEventRow[]) => stuckExit(rows)?.event_type;
+    expect(exit([into, event('budget_raised', 'stuck', 'implementing')])).toBe('budget_raised');
+    expect(exit([into, event('pause', 'stuck', 'paused')])).toBe('pause');
+    expect(exit([into, event('pause', 'stuck', 'paused'), event('cancel', 'paused', 'cancelled')])).toBe('cancel');
+    expect(exit([into, event('pause', 'stuck', 'paused'), event('amended', 'paused', 'implementing')])).toBe('amended');
+    // A resumed visit ended later by a raise; ignored rows and a later pause elsewhere do not count.
+    expect(
+      exit([into, event('pause', 'stuck', 'paused'), event('resume', 'paused', 'stuck'), event('budget_raised', 'stuck', 'stuck', 'ignored'), event('budget_raised', 'stuck', 'implementing'), event('pause', 'implementing', 'paused'), event('cancel', 'paused', 'cancelled')]),
+    ).toBe('budget_raised');
+    // Two pauses in one visit: the second pause, then what ended it.
+    const twice = [into, event('pause', 'stuck', 'paused'), event('resume', 'paused', 'stuck'), event('pause', 'stuck', 'paused')];
+    expect(exit(twice)).toBe('pause');
+    expect(exit([...twice, event('amended', 'paused', 'implementing')])).toBe('amended');
+    expect(exit([into])).toBeUndefined();
   });
 });

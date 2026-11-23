@@ -1,6 +1,6 @@
 import { parse as parseYaml } from 'yaml';
 import { ANSWER, APPROVE, DISCARD, DRAFT_CARD, DROP, UNDO, USE_PROPOSAL } from '../adapters/telegram/cards/draft-card.ts';
-import { STALE_TAP_TOAST, type CallbackCommand, type InboundMessage } from '../adapters/telegram/poller.ts';
+import type { CallbackCommand, InboundMessage } from '../adapters/telegram/poller.ts';
 import type { Coordinator } from '../core/coordinator/coordinator.ts';
 import { MAX_OPEN_QUESTIONS, recordAnswers, writeDraft, type DraftInput } from '../core/coordinator/drafts.ts';
 import {
@@ -42,7 +42,7 @@ export const TOAST = {
 
 export interface IntakeOptions {
   store: Store;
-  coordinator: Pick<Coordinator, 'applyEvent' | 'createTask' | 'approveDraft' | 'answerQuestion' | 'useProposal' | 'dropCriterion' | 'requestInboxScan'>;
+  coordinator: Pick<Coordinator, 'applyEvent' | 'createTask' | 'approveDraft' | 'answerQuestion' | 'useProposal' | 'dropCriterion' | 'requestInboxScan' | 'refreshCard'>;
   repo: Pick<Repo, 'fetch' | 'mainSha' | 'syncMain' | 'readFile' | 'listTree' | 'addTaskWorktree' | 'commitInWorktree'>;
   clock: Clock;
   /** Read on every use so a SIGHUP reload applies. */
@@ -336,16 +336,36 @@ export class Intake {
     this.#log.info({ event: 'contract_committed', task_id: task.id, version: contract.version, commit: commit ?? null }, 'contract_committed');
   }
 
-  /** The Draft card's buttons (AD-9, AD-10): Coordinator commands bound to the states they act in. */
+  /**
+   * The Draft card's redraw payload: from the rows, with `Discarded` for a discarded draft. Undefined for a
+   * Task cancelled any other way, which the card cannot show: it then only loses its buttons.
+   */
+  #redrawPayload(task: Task): Record<string, unknown> | undefined {
+    if (task.state !== 'cancelled') return {};
+    const entry = this.#store.stageEventsOfTask(task.id).findLast((row) => row.status === 'applied' && row.to_state === 'cancelled');
+    return entry?.from_state === 'discard_pending' ? { closed: 'discarded' } : undefined;
+  }
+
+  /**
+   * The Draft card's buttons (AD-9, AD-10): Coordinator commands bound to the states they act in. A tap that
+   * cannot act names the Task's state and redraws the card (EXPERIENCE.md → Stale button).
+   */
   callbacks(): Array<[string, CallbackCommand]> {
     const open = ['awaiting_approval'] as const;
-    const stale = { toast: STALE_TAP_TOAST };
+    const stale = { stale: true };
+    const redraw = {
+      redraw: async (task: Task) => {
+        const payload = this.#redrawPayload(task);
+        return payload !== undefined && (await this.#coordinator.refreshCard(task.id, DRAFT_CARD, task.state, payload));
+      },
+    };
     const argNumber = (args: Record<string, unknown>, key: string): number => Number(args[key]);
     return [
       [
         ANSWER,
         {
           states: open,
+          stale: redraw,
           handle: async ({ callback, task }) => {
             const ok = await this.#coordinator.answerQuestion(task!.id, argNumber(callback.args, 'q_no'), String(callback.args['answer']));
             return ok ? { toast: TOAST.answered } : stale;
@@ -356,6 +376,7 @@ export class Intake {
         USE_PROPOSAL,
         {
           states: open,
+          stale: redraw,
           handle: async ({ callback, task }) => ((await this.#coordinator.useProposal(task!.id, argNumber(callback.args, 'ac_no'))) ? { toast: TOAST.proposal } : stale),
         },
       ],
@@ -363,6 +384,7 @@ export class Intake {
         DROP,
         {
           states: open,
+          stale: redraw,
           handle: async ({ callback, task }) => {
             const acNo = argNumber(callback.args, 'ac_no');
             return (await this.#coordinator.dropCriterion(task!.id, acNo)) ? { toast: TOAST.dropped(acNo) } : stale;
@@ -373,6 +395,7 @@ export class Intake {
         APPROVE,
         {
           states: open,
+          stale: redraw,
           handle: async ({ task }) => {
             const project = this.#store.getProject(task!.project_id);
             if (project === undefined) return stale;
@@ -392,6 +415,7 @@ export class Intake {
         DISCARD,
         {
           states: open,
+          stale: redraw,
           handle: async ({ task }) => ((await this.#coordinator.applyEvent(task!.id, { type: 'discarded' })).applied ? { toast: TOAST.discarded } : stale),
         },
       ],
@@ -399,6 +423,7 @@ export class Intake {
         UNDO,
         {
           states: ['discard_pending'],
+          stale: redraw,
           handle: async ({ task }) => ((await this.#coordinator.applyEvent(task!.id, { type: 'undone' })).applied ? { toast: TOAST.restored } : stale),
         },
       ],

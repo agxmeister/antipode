@@ -6,13 +6,19 @@ import type { Clock } from '../../core/ports/clock.ts';
 import { silentLog, type Log } from '../../core/ports/log.ts';
 import type { Store } from '../../core/ports/store.ts';
 import { backoffMs } from './sender.ts';
-import { clip, escapeHtml, textMessage } from './cards/card.ts';
+import { clip, escapeHtml, NO_KEYBOARD, textMessage } from './cards/card.ts';
 
 /** `getUpdates` long-poll timeout in seconds. */
 export const POLL_TIMEOUT_S = 30;
 /** A callback handler that runs longer than this is answered without text; its toast follows as a reply. */
 export const CALLBACK_ANSWER_MS = 4_000;
 export const STALE_TAP_TOAST = 'This Review was replaced by a newer one.';
+
+/** The stale answer of a non-Review card (EXPERIENCE.md → Stale button): where the Task is now. */
+export function stateToast(task: Task): string {
+  const state = task.state.replaceAll('_', ' ');
+  return task.task_no === null ? `This draft is ${state} now.` : `#${task.task_no} is ${state} now.`;
+}
 export const ACK_REACTION = '👀';
 /** The only command an unbound chat dispatches (AD-10). */
 export const REGISTER_COMMAND = 'register';
@@ -81,7 +87,22 @@ export interface CallbackInput {
 export interface CallbackCommand {
   /** States the Task must be in; omit for a command without a Task. */
   states?: readonly TaskState[];
-  handle(input: CallbackInput): Promise<{ toast?: string } | void> | { toast?: string } | void;
+  /** Only a tap on the Task's newest card acts (the Stuck card, AD-10): an older card's buttons never do. */
+  newestCardOnly?: boolean;
+  /**
+   * How a tap that cannot act is answered (AD-10). Omitted: the Review answer, `STALE_TAP_TOAST` and a reply
+   * to the Task's latest card. Given: `stateToast`, and the tapped card is redrawn: `redraw` when it is the
+   * Task's newest card, otherwise its buttons are removed. `redraw` resolves `false` when the card cannot
+   * show the Task's state; its buttons are then removed too.
+   */
+  stale?: { redraw(task: Task): Promise<boolean> | boolean };
+  handle(input: CallbackInput): Promise<CallbackResult | void> | CallbackResult | void;
+}
+
+/** A handler's answer: its toast, or `stale` when the Coordinator refused, answered like a stale tap. */
+export interface CallbackResult {
+  toast?: string;
+  stale?: boolean;
 }
 
 export interface PollerOptions {
@@ -307,12 +328,14 @@ export class Poller {
     const callback = data.startsWith(CALLBACK_PREFIX) ? this.#store.getCallback(data.slice(CALLBACK_PREFIX.length)) : undefined;
     const command = callback === undefined ? undefined : this.callbacks.get(callback.command);
     const task = callback?.task_id == null ? undefined : this.#store.getTask(callback.task_id);
-    if (callback === undefined || command === undefined || !this.#valid(callback, command, task)) {
-      await this.#staleTap(query, callback, task);
+    if (callback === undefined || command === undefined || !this.#valid(callback, command, task, chatId, messageId)) {
+      await this.#staleTap(query, callback, command, task, chatId, messageId);
       return;
     }
     const input: CallbackInput = { query, callback, task, chatId, messageId };
-    const run = Promise.resolve().then(() => command.handle(input));
+    const run = Promise.resolve()
+      .then(() => command.handle(input))
+      .then(async (result) => (result?.stale === true ? { toast: await this.#refused(command, task, chatId, messageId) } : result));
     let timer: ReturnType<typeof setTimeout> | undefined;
     const slow = new Promise<'slow'>((resolve) => {
       timer = setTimeout(() => resolve('slow'), this.#callbackAnswerMs);
@@ -340,19 +363,72 @@ export class Poller {
     this.#late.add(late);
   }
 
-  /** A row is valid iff its Task is in a state the command expects, `round = review_round`, and it has not expired. */
-  #valid(callback: CallbackRow, command: CallbackCommand, task: Task | undefined): boolean {
+  /**
+   * A row is valid iff its Task is in a state the command expects, `round = review_round`, it has not
+   * expired, and, for a `newestCardOnly` command, the tapped message is the Task's newest card.
+   */
+  #valid(callback: CallbackRow, command: CallbackCommand, task: Task | undefined, chatId: number | undefined, messageId: number | undefined): boolean {
     if (callback.expires_at !== null && Date.parse(callback.expires_at) <= this.#clock.now().getTime()) return false;
     if (callback.task_id === null) return true;
     if (task === undefined) return false;
     if (command.states !== undefined && !command.states.includes(task.state)) return false;
     if (callback.round !== null && callback.round !== task.review_round) return false;
+    if (command.newestCardOnly === true && !this.#isNewestCard(task, chatId, messageId)) return false;
     return true;
   }
 
-  /** The "replaced" toast, plus a reply to the Task's latest card when there is one. */
-  async #staleTap(query: CallbackQuery, callback: CallbackRow | undefined, task: Task | undefined): Promise<void> {
+  #isNewestCard(task: Task, chatId: number | undefined, messageId: number | undefined): boolean {
+    const newest = this.#store.latestCardOfTask(task.id);
+    return newest !== undefined && newest.chat_id === chatId && newest.message_id === messageId;
+  }
+
+  /**
+   * The answer to a tap its handler refused: the command's stale answer, after re-reading the Task the
+   * handler may have seen change. A command without one gets the Review answer's toast.
+   */
+  async #refused(command: CallbackCommand, task: Task | undefined, chatId: number | undefined, messageId: number | undefined): Promise<string> {
+    const current = task === undefined ? undefined : this.#store.getTask(task.id);
+    if (command.stale === undefined || current === undefined) return STALE_TAP_TOAST;
+    return this.#staleAnswer(command.stale, current, chatId, messageId);
+  }
+
+  /** `stateToast`, after redrawing the tapped card: `redraw` for the Task's newest card, no buttons for an older one. */
+  async #staleAnswer(stale: NonNullable<CallbackCommand['stale']>, task: Task, chatId: number | undefined, messageId: number | undefined): Promise<string> {
+    if (chatId !== undefined && messageId !== undefined) {
+      let redrawn = false;
+      if (this.#isNewestCard(task, chatId, messageId)) {
+        try {
+          redrawn = await stale.redraw(task);
+        } catch (error) {
+          this.#log.warn({ event: 'telegram_stale_redraw_failed', task_id: task.id, error: errorText(error) }, 'telegram_stale_redraw_failed');
+        }
+      }
+      if (!redrawn) {
+        this.#enqueue(chatId, [
+          { kind: 'stale_tap_retire', task_id: task.id, target_message_id: messageId, payload: { method: 'editMessageReplyMarkup', params: { reply_markup: NO_KEYBOARD } } },
+        ]);
+      }
+    }
+    return stateToast(task);
+  }
+
+  /**
+   * A tap that cannot act. A command with a `stale` answer gets it; otherwise the "replaced" toast, plus a
+   * reply to the Task's latest card when there is one.
+   */
+  async #staleTap(
+    query: CallbackQuery,
+    callback: CallbackRow | undefined,
+    command: CallbackCommand | undefined,
+    task: Task | undefined,
+    chatId: number | undefined,
+    messageId: number | undefined,
+  ): Promise<void> {
     this.#log.info({ event: 'telegram_stale_tap', callback_id: callback?.id, command: callback?.command, task_id: task?.id }, 'telegram_stale_tap');
+    if (command?.stale !== undefined && task !== undefined) {
+      await this.#answer(query, await this.#staleAnswer(command.stale, task, chatId, messageId));
+      return;
+    }
     const card = task === undefined ? undefined : this.#store.latestCardOfTask(task.id);
     // With a card to point at, the reply to it also covers an offline tap whose toast is refused.
     await this.#answer(query, STALE_TAP_TOAST, card === undefined);
