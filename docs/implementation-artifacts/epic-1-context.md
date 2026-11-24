@@ -145,7 +145,7 @@ Build the whole Antipode MVP loop end to end on the Owner's Mac. A single daemon
 - **After a tap.**
   - Cards are edited in place.
   - `Accept` shows `Undo` for 10 s.
-  - A tap on an outdated Review card gets `This Review was replaced by a newer one.` On other cards, a tap that can no longer act gets `#${id} is ${state} now.` and the card is redrawn.
+  - A tap on an outdated Review card gets `This Review was replaced by a newer one.` On other cards, a tap that can no longer act gets `#${id} is ${state} now.` and the card is redrawn. `${state}` uses EXPERIENCE.md → State words (`#12 is being tested now.`).
   - `Request changes` opens a force-reply. A Correction that only adds a note goes straight back to the Implementer, and a change to criteria needs an Interpretation card.
   - The Stuck card offers `Raise budget +2` / `Cancel Task` (only `Cancel Task` when stuck on dependencies), and `Cancel Task` asks for confirmation in place. After a blocked Implementer, Triage's `park` ends at the Stuck card. Every exit from `stuck` closes the card (`⏸ Paused by you` on pause); only the newest Stuck card has buttons.
 - **Sound** comes only from the Review card, Stuck, Release failed, Onboarding blocked and Registration failed.

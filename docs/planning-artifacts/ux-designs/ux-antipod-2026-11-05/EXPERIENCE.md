@@ -80,6 +80,31 @@ Rules:
 - Durations are approximate (`~14 min`) and times are local (`~14:20`).
 - Never mention Stages, Roles or the Coordinator unless the Owner asks (`/log`). The exception is a Peek, whose status line names the active Role.
 
+**State words.** Wherever a Task's state reaches the Owner (`${state}` in this document and DESIGN.md: the stale-tap toast, the Peek reply, the status list), it is written as below, never as the internal name. Each phrase reads after "is": `#12 is being tested now.`
+
+| State | Words |
+|---|---|
+| `draft` | being revised |
+| `awaiting_approval` | waiting for your approval |
+| `discard_pending` | discarded · undo open |
+| `queued` | queued |
+| `waiting_on_dependencies` | waiting on dependencies |
+| `implementing` | being implemented |
+| `testing` | being tested |
+| `validating` | being validated |
+| `triage` | deciding the next step |
+| `evidencing` | collecting Evidence |
+| `verifying` | checking Evidence |
+| `in_review` | ready for review |
+| `accept_pending` | accepted · undo open |
+| `integrating` | being merged |
+| `merged` | merged, releasing |
+| `release_failed` | merged, release failed |
+| `released` | released |
+| `cancelled` | cancelled |
+| `stuck` | stuck |
+| `paused` | paused |
+
 ## Component Patterns
 
 Behavioral rules only. Visual specs are in `DESIGN.md` → Components.
@@ -135,11 +160,11 @@ Behavioral rules only. Visual specs are in `DESIGN.md` → Components.
 | Nothing to peek | Reply | `Nothing running. Next up: #${id}`, or `Nothing running.` |
 | No cost data yet | Cost reply | `No usage recorded yet.` |
 | Ambiguous Owner Message | Reply | One question with quick-answer or Task buttons (FR-10). Nothing acts until it is answered. |
-| Peek on non-running Task | Reply | `#${id} is ${state} — nothing to peek.` |
+| Peek on non-running Task | Reply | `#${id} is ${state} — nothing to peek.` (`${state}` in State words.) |
 | Demo preview asleep `[POST-MVP]` | Demo link | The link wakes the preview (FR-24). If the wake takes more than a few seconds, the bot replies `Waking preview · ~30 s`. |
 | Evidence send failed | None, then notice | Retried silently. After the retry limit, a loud `❌ #${id} Review couldn't be delivered: ${reason}`, followed by `/evidence ${id}` once it is fixed. |
 | Unanswered Correction prompt | Force-reply | Nothing happens; the Task stays in review. The next free text that replies to the prompt is the Correction. |
-| Stale button | Toast | Tapping a button on an outdated Review card: `This Review was replaced by a newer one.` The bot then replies to the newer card. On any other card, a button that can no longer act answers with where the Task is now, `#${id} is ${state} now.` (`This draft is ${state} now.` before approval), and the tapped card is edited to its current state. |
+| Stale button | Toast | Tapping a button on an outdated Review card: `This Review was replaced by a newer one.` The bot then replies to the newer card. On any other card, a button that can no longer act answers with where the Task is now, `#${id} is ${state} now.` (`This draft is ${state} now.` before approval), and the tapped card is edited to its current state. `${state}` is written as in Voice and Tone → State words. |
 
 ## Interaction Primitives
 
