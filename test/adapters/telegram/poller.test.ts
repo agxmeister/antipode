@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TelegramMessenger } from '../../../src/adapters/telegram/messenger.ts';
 import { parseCommand, Poller, STALE_TAP_TOAST, stateToast, type CallbackCommand, type CommandInput, type InboundMessage } from '../../../src/adapters/telegram/poller.ts';
+import { STATE_WORDS } from '../../../src/adapters/telegram/cards/card.ts';
 import { ulid } from '../../../src/core/domain/ids.ts';
+import { TASK_STATES } from '../../../src/core/domain/task.ts';
 import { LAST_UPDATE_ID_SETTING, type OutboxDraft } from '../../../src/core/domain/telegram.ts';
 import { fakeClock, type FakeClock } from '../../helpers/clock.ts';
 import { OWNER_ID } from '../../helpers/home.ts';
@@ -409,7 +411,7 @@ describe('Poller: stale answers of non-Review cards (EXPERIENCE.md → Stale but
     h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 40, task_id: task.id, round: null, kind: 'stuck_card' });
     await h.poller.handleUpdate(tapUpdate(200, data, { messageId: 40 }));
     expect(handled).toEqual([]);
-    expect(h.tg.callsOf('answerCallbackQuery')).toEqual([{ callback_query_id: 'q200', text: '#3 is implementing now.' }]);
+    expect(h.tg.callsOf('answerCallbackQuery')).toEqual([{ callback_query_id: 'q200', text: '#3 is being implemented now.' }]);
     expect(redrawn).toEqual(['implementing']);
     // No reply pointing elsewhere: the card itself is put right.
     expect(h.replies).toEqual([]);
@@ -453,8 +455,15 @@ describe('Poller: stale answers of non-Review cards (EXPERIENCE.md → Stale but
     expect(h.replies).toEqual([{ chatId: CHAT_ID, drafts: [expect.objectContaining({ kind: 'stale_tap_retire', target_message_id: 40 })] }]);
   });
 
-  it('an unnumbered draft is named as a draft', () => {
-    expect(stateToast({ task_no: null, state: 'discard_pending' } as never)).toBe('This draft is discard pending now.');
+  it('names an unnumbered draft as a draft and a numbered Task by its number, in State words', () => {
+    expect(stateToast({ task_no: null, state: 'discard_pending' } as never)).toBe('This draft is discarded · undo open now.');
     expect(stateToast({ task_no: 12, state: 'waiting_on_dependencies' } as never)).toBe('#12 is waiting on dependencies now.');
+    expect(stateToast({ task_no: null, state: 'draft' } as never)).toBe('This draft is being revised now.');
+    expect(stateToast({ task_no: 12, state: 'testing' } as never)).toBe('#12 is being tested now.');
+    expect(stateToast({ task_no: 12, state: 'accept_pending' } as never)).toBe('#12 is accepted · undo open now.');
+    for (const state of TASK_STATES) {
+      expect(stateToast({ task_no: 12, state } as never)).toBe(`#12 is ${STATE_WORDS[state]} now.`);
+      expect(stateToast({ task_no: null, state } as never)).not.toContain('_');
+    }
   });
 });

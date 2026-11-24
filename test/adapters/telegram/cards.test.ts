@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { backOnlineCard } from '../../../src/adapters/telegram/cards/back-online.ts';
 import {
@@ -6,13 +7,14 @@ import {
   escapeHtml,
   fit,
   keyboard,
+  STATE_WORDS,
   TEXT_LIMIT,
   visibleLength,
   type CardEnv,
 } from '../../../src/adapters/telegram/cards/card.ts';
 import { deliveryFailedCard } from '../../../src/adapters/telegram/cards/delivery-failed.ts';
 import { renderStuckCard, STUCK_CARD, STUCK_FOOTER } from '../../../src/adapters/telegram/cards/stuck-card.ts';
-import { taskSchema, type Task } from '../../../src/core/domain/task.ts';
+import { TASK_STATES, taskSchema, type Task } from '../../../src/core/domain/task.ts';
 import { usageWindowResumedCard } from '../../../src/adapters/telegram/cards/usage-window-resumed.ts';
 import { usageWindowWaitCard } from '../../../src/adapters/telegram/cards/usage-window-wait.ts';
 import { ULID_PATTERN } from '../../../src/core/domain/ids.ts';
@@ -183,5 +185,17 @@ describe('Stuck card (DESIGN stuck-card)', () => {
     e.store.enqueueOutbox(-1, [first!], null, NOW);
     const [restored] = renderStuckCard(notice(task, { mode: 'restore' }), e);
     expect(texts(restored!)).toEqual([['Cancel Task']]);
+  });
+});
+
+describe('State words (EXPERIENCE.md → Voice and Tone)', () => {
+  it('give every Task state the words of the EXPERIENCE.md table', () => {
+    const doc = readFileSync(new URL('../../../docs/planning-artifacts/ux-designs/ux-antipod-2026-11-05/EXPERIENCE.md', import.meta.url), 'utf8');
+    const section = doc.slice(doc.indexOf('**State words.**'), doc.indexOf('\n## ', doc.indexOf('**State words.**')));
+    const rows = [...section.matchAll(/^\| `([a-z_]+)` \| ([^|]+?) \|$/gm)];
+    expect(rows).toHaveLength(TASK_STATES.length);
+    const table = Object.fromEntries(rows.map((m) => [m[1], m[2]]));
+    expect(Object.keys(STATE_WORDS).sort()).toEqual([...TASK_STATES].sort());
+    expect(STATE_WORDS).toEqual(table);
   });
 });

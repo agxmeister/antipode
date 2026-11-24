@@ -76,6 +76,7 @@
 - source_spec: `docs/implementation-artifacts/spec-1-9-stale-taps.md`
   summary: Decide Owner-facing words for raw Task states in the stale-tap toast, e.g. `This draft is draft now.` for a tap while Intake revises a draft.
   evidence: `stateToast` (`poller.ts`) prints the state identifier with `_` as spaces, as EXPERIENCE.md's `${state}` pattern says; some states read badly and the UX docs have no state wording table, so the copy needs an Owner/UX decision.
+  resolved: Sprint Change Proposal 2026-11-24, implemented in `docs/implementation-artifacts/spec-1-9-state-words.md`.
 - source_spec: `docs/implementation-artifacts/spec-1-9-stale-taps.md`
   summary: Redraw an older card's text on a stale tap, not only remove its buttons, if the Owner wants it "edited to its current state" in full.
   evidence: `#staleAnswer` strips the keyboard of a card that is not the Task's newest; its text (e.g. a Stuck card whose close edit failed) keeps the reason and footer. Rare: it needs a failed close edit. EXPERIENCE.md says the tapped card is edited to its current state.

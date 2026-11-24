@@ -6,7 +6,7 @@ import type { Clock } from '../../core/ports/clock.ts';
 import { silentLog, type Log } from '../../core/ports/log.ts';
 import type { Store } from '../../core/ports/store.ts';
 import { backoffMs } from './sender.ts';
-import { clip, escapeHtml, NO_KEYBOARD, textMessage } from './cards/card.ts';
+import { clip, escapeHtml, NO_KEYBOARD, STATE_WORDS, textMessage } from './cards/card.ts';
 
 /** `getUpdates` long-poll timeout in seconds. */
 export const POLL_TIMEOUT_S = 30;
@@ -14,9 +14,9 @@ export const POLL_TIMEOUT_S = 30;
 export const CALLBACK_ANSWER_MS = 4_000;
 export const STALE_TAP_TOAST = 'This Review was replaced by a newer one.';
 
-/** The stale answer of a non-Review card (EXPERIENCE.md → Stale button): where the Task is now. */
+/** The stale answer of a non-Review card (EXPERIENCE.md → Stale button): where the Task is now, in State words. */
 export function stateToast(task: Task): string {
-  const state = task.state.replaceAll('_', ' ');
+  const state = STATE_WORDS[task.state];
   return task.task_no === null ? `This draft is ${state} now.` : `#${task.task_no} is ${state} now.`;
 }
 export const ACK_REACTION = '👀';

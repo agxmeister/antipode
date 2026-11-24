@@ -1,4 +1,5 @@
 import { ulid } from '../../../core/domain/ids.ts';
+import type { TaskState } from '../../../core/domain/task.ts';
 import { CALLBACK_PREFIX, type OutboxDraft } from '../../../core/domain/telegram.ts';
 import type { Clock } from '../../../core/ports/clock.ts';
 import type { Store } from '../../../core/ports/store.ts';
@@ -135,3 +136,30 @@ export function textMessage(kind: string, html: string, options: TextMessageOpti
   if (options.reply_markup !== undefined) params['reply_markup'] = options.reply_markup;
   return { kind, task_id: options.task_id ?? null, round: options.round ?? null, payload: { method: 'sendMessage', params } };
 }
+
+/**
+ * How a Task's state reads to the Owner (EXPERIENCE.md → Voice and Tone → State words): after "is", never
+ * the internal name. The one source for `${state}`: `stateToast` today, `/peek` and `/status` when built.
+ */
+export const STATE_WORDS: Readonly<Record<TaskState, string>> = {
+  draft: 'being revised',
+  awaiting_approval: 'waiting for your approval',
+  discard_pending: 'discarded · undo open',
+  queued: 'queued',
+  waiting_on_dependencies: 'waiting on dependencies',
+  implementing: 'being implemented',
+  testing: 'being tested',
+  validating: 'being validated',
+  triage: 'deciding the next step',
+  evidencing: 'collecting Evidence',
+  verifying: 'checking Evidence',
+  in_review: 'ready for review',
+  accept_pending: 'accepted · undo open',
+  integrating: 'being merged',
+  merged: 'merged, releasing',
+  release_failed: 'merged, release failed',
+  released: 'released',
+  cancelled: 'cancelled',
+  stuck: 'stuck',
+  paused: 'paused',
+};

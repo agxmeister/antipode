@@ -184,7 +184,7 @@ describe('Intake drafts from Owner text (CAP-7, CAP-8, CAP-9)', () => {
     h.push((id) => tapUpdate(id, staleData, { messageId: cardMessageId(h) }));
     await vi.waitFor(() => expect(toasts(h)).toHaveLength(2));
     expect(toasts(h)[1]).toBe(stateToast(h.daemon.store.getTask(task.id)!));
-    expect(toasts(h)[1]).toBe('This draft is awaiting approval now.');
+    expect(toasts(h)[1]).toBe('This draft is waiting for your approval now.');
     expect(h.daemon.store.questionsOf(task.id)[0]!.answer).toBe('Not yet');
     // The tapped card is redrawn from the rows: the same text and buttons.
     await vi.waitFor(() => expect(h.edits()).toHaveLength(2));
