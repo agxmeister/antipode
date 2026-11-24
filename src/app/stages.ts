@@ -556,13 +556,21 @@ function findingLines(findings: ReadonlyArray<{ criterion_id: string; note: stri
   return findings.map((finding) => `- ${finding.criterion_id}: ${finding.note}`);
 }
 
+/** A code fence longer than any backtick run in `text`, so the text cannot close it early. */
+export function fenceFor(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+
 /** The last lap's blocking findings and failed test, as the Implementer and Triage briefs show them. */
 function failureLines(lap: LastLap): string[] {
   const lines: string[] = [];
   if (lap.blocking.length > 0) lines.push('Blocking findings of the Validator:', ...findingLines(lap.blocking), '');
   if (lap.testFailure !== undefined) {
     const how = lap.testFailure.outcome === 'timeout' ? 'timed out' : `exited ${lap.testFailure.exit_code}`;
-    lines.push(`The Recipe \`test\` step ${how}. The tail of its log:`, '', '```', lap.testFailure.log_tail ?? '', '```', '');
+    const tail = lap.testFailure.log_tail ?? '';
+    const fence = fenceFor(tail);
+    lines.push(`The Recipe \`test\` step ${how}. The tail of its log:`, '', fence, tail, fence, '');
   }
   return lines;
 }
