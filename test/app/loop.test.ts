@@ -340,7 +340,7 @@ describe('the implement, validate and triage loop (CAP-13, CAP-19, CAP-20)', () 
     await vi.waitFor(() => expect(h.buttons()).toEqual(['Raise budget +2', 'Cancel Task']));
     const budget = h.daemon.store.getTask(h.task.id)!.budget_limit;
 
-    // The old card's button (as if its close never reached Telegram) acts on nothing.
+    // The old card's button (as if its close never reached Telegram) acts on nothing; the card is redrawn closed.
     updateId += 1;
     h.tg.pushUpdates(tapUpdate(updateId, raise.callback_data, { messageId: oldCard.sent_message_id! }));
     await vi.waitFor(() => expect(h.toasts().at(-1)).toBe(`#${h.task.task_no} is stuck now.`));
@@ -348,7 +348,10 @@ describe('the implement, validate and triage loop (CAP-13, CAP-19, CAP-20)', () 
     expect(h.daemon.store.getTask(h.task.id)!.budget_limit).toBe(budget);
     await vi.waitFor(() =>
       expect(h.daemon.store.outboxOfChat(CHAT_ID).filter((row) => row.kind === 'stale_tap_retire')).toEqual([
-        expect.objectContaining({ target_message_id: oldCard.sent_message_id, payload: { method: 'editMessageReplyMarkup', params: { reply_markup: { inline_keyboard: [] } } } }),
+        expect.objectContaining({
+          target_message_id: oldCard.sent_message_id,
+          payload: { method: 'editMessageText', params: { text: expect.stringMatching(/\n\n⏸ Paused by you$/), reply_markup: { inline_keyboard: [] } } },
+        }),
       ]),
     );
     expect(h.buttons()).toEqual(['Raise budget +2', 'Cancel Task']);

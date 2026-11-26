@@ -80,3 +80,4 @@
 - source_spec: `docs/implementation-artifacts/spec-1-9-stale-taps.md`
   summary: Redraw an older card's text on a stale tap, not only remove its buttons, if the Owner wants it "edited to its current state" in full.
   evidence: `#staleAnswer` strips the keyboard of a card that is not the Task's newest; its text (e.g. a Stuck card whose close edit failed) keeps the reason and footer. Rare: it needs a failed close edit. EXPERIENCE.md says the tapped card is edited to its current state.
+  resolved: implemented in `docs/implementation-artifacts/spec-1-9-older-card-redraw.md`.

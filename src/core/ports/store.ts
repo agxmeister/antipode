@@ -126,6 +126,11 @@ export interface Store {
   outboxOfChat(chatId: number): OutboxRow[];
   /** The newest send of a card kind for `taskId` (and `round`, when given), in any status. */
   latestCardOutbox(taskId: string, round?: number): OutboxRow | undefined;
+  /**
+   * Every render of one sent message, in `sequence` order: the `send*` row whose `sent_message_id` it is,
+   * then each row of the chat aimed at it by `target_message_id` or at that send row by `target_outbox_id`.
+   */
+  rendersOfMessage(chatId: number, messageId: number): OutboxRow[];
   markOutboxSent(id: string, sentMessageId: number | null, sentAt: string): void;
   /** Records a failed attempt that will be retried at `nextAttemptAt`. */
   markOutboxAttempt(id: string, attempts: number, nextAttemptAt: string, error: string): void;

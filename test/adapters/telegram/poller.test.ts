@@ -437,6 +437,57 @@ describe('Poller: stale answers of non-Review cards (EXPERIENCE.md → Stale but
     expect(handled).toHaveLength(1);
   });
 
+  it('an older card whose close edit failed is redrawn with that closed text and no buttons', async () => {
+    const h = harness();
+    const { task, data } = setupStuck(h, 'stuck');
+    const keyboard = { inline_keyboard: [[{ text: 'Cancel Task', callback_data: 'cb:x' }]] };
+    const [send] = h.ts.store.enqueueOutbox(CHAT_ID, [{ kind: 'stuck_card', task_id: task.id, payload: { method: 'sendMessage', params: { text: 'Stuck\n\nOr reply', reply_markup: keyboard } } }], null, NOW);
+    h.ts.store.markOutboxSent(send!.id, 40, NOW);
+    const [close] = h.ts.store.enqueueOutbox(
+      CHAT_ID,
+      [{ kind: 'stuck_card', task_id: task.id, target_outbox_id: send!.id, payload: { method: 'editMessageText', params: { text: 'Stuck\n\n⏸ Paused by you', reply_markup: { inline_keyboard: [] } } } }],
+      null,
+      NOW,
+    );
+    h.ts.store.markOutboxFailed(close!.id, 5, 'fetch failed: retries exhausted');
+    // A keyboard-only edit after it carries no text and is skipped.
+    h.ts.store.enqueueOutbox(CHAT_ID, [{ kind: 'stale_tap_retire', task_id: task.id, target_message_id: 40, payload: { method: 'editMessageReplyMarkup', params: { reply_markup: { inline_keyboard: [] } } } }], null, NOW);
+    h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 40, task_id: task.id, round: null, kind: 'stuck_card' });
+    h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 41, task_id: task.id, round: null, kind: 'stuck_card' });
+    expect(h.ts.store.rendersOfMessage(CHAT_ID, 40).map((row) => row.payload.method)).toEqual(['sendMessage', 'editMessageText', 'editMessageReplyMarkup']);
+    expect(h.ts.store.rendersOfMessage(CHAT_ID, 41)).toEqual([]);
+    await h.poller.handleUpdate(tapUpdate(215, data, { messageId: 40 }));
+    expect(h.tg.callsOf('answerCallbackQuery')).toEqual([{ callback_query_id: 'q215', text: '#3 is stuck now.' }]);
+    expect(h.replies).toEqual([
+      {
+        chatId: CHAT_ID,
+        drafts: [
+          {
+            kind: 'stale_tap_retire',
+            task_id: task.id,
+            target_message_id: 40,
+            payload: { method: 'editMessageText', params: { text: 'Stuck\n\n⏸ Paused by you', reply_markup: { inline_keyboard: [] } } },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('an older card skips a render Telegram refused and falls back to the text before it', async () => {
+    const h = harness();
+    const { task, data } = setupStuck(h, 'stuck');
+    const [send] = h.ts.store.enqueueOutbox(CHAT_ID, [{ kind: 'stuck_card', task_id: task.id, payload: { method: 'sendMessage', params: { text: 'Stuck' } } }], null, NOW);
+    h.ts.store.markOutboxSent(send!.id, 40, NOW);
+    const [close] = h.ts.store.enqueueOutbox(CHAT_ID, [{ kind: 'stuck_card', task_id: task.id, target_outbox_id: send!.id, payload: { method: 'editMessageText', params: { text: '<b>bad' } } }], null, NOW);
+    h.ts.store.markOutboxFailed(close!.id, 1, "400: Bad Request: can't parse entities");
+    h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 40, task_id: task.id, round: null, kind: 'stuck_card' });
+    h.ts.store.insertTelegramMessage({ chat_id: CHAT_ID, message_id: 41, task_id: task.id, round: null, kind: 'stuck_card' });
+    await h.poller.handleUpdate(tapUpdate(216, data, { messageId: 40 }));
+    expect(h.replies).toEqual([
+      { chatId: CHAT_ID, drafts: [expect.objectContaining({ payload: { method: 'editMessageText', params: { text: 'Stuck', reply_markup: { inline_keyboard: [] } } } })] },
+    ]);
+  });
+
   it('a handler refusal gets the same answer, from the Task as it is after the handler', async () => {
     const h = harness();
     const { task, redrawn, data } = setupStuck(h, 'stuck', { refuse: true });

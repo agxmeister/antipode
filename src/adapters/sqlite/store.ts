@@ -261,6 +261,7 @@ export class SqliteStore implements Store {
     outboxOfChat: Statement;
     latestCardOutbox: Statement;
     latestCardOutboxOfRound: Statement;
+    rendersOfMessage: Statement;
     markOutboxSent: Statement;
     markOutboxAttempt: Statement;
     markOutboxFailed: Statement;
@@ -370,6 +371,14 @@ export class SqliteStore implements Store {
       latestCardOutboxOfRound: db.prepare(
         `SELECT * FROM outbox WHERE task_id = ? AND round = ? AND kind GLOB '*_card' AND json_extract(payload, '$.method') LIKE 'send%'
          ORDER BY created_at DESC, sequence DESC LIMIT 1`,
+      ),
+      rendersOfMessage: db.prepare(
+        `WITH sends AS (
+           SELECT id FROM outbox WHERE chat_id = @chat_id AND sent_message_id = @message_id AND json_extract(payload, '$.method') LIKE 'send%'
+         )
+         SELECT * FROM outbox WHERE chat_id = @chat_id
+           AND (id IN (SELECT id FROM sends) OR target_message_id = @message_id OR target_outbox_id IN (SELECT id FROM sends))
+         ORDER BY sequence`,
       ),
       markOutboxSent: db.prepare(
         "UPDATE outbox SET status = 'sent', sent_message_id = @sent_message_id, sent_at = @sent_at, error = NULL, attempts = attempts + 1 WHERE id = @id",
@@ -734,6 +743,10 @@ export class SqliteStore implements Store {
   latestCardOutbox(taskId: string, round?: number): OutboxRow | undefined {
     const row = round === undefined ? this.#stmt.latestCardOutbox.get(taskId) : this.#stmt.latestCardOutboxOfRound.get(taskId, round);
     return row === undefined ? undefined : toOutboxRow(row);
+  }
+
+  rendersOfMessage(chatId: number, messageId: number): OutboxRow[] {
+    return this.#stmt.rendersOfMessage.all({ chat_id: chatId, message_id: messageId }).map(toOutboxRow);
   }
 
   markOutboxSent(id: string, sentMessageId: number | null, sentAt: string): void {

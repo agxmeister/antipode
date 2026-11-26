@@ -395,6 +395,31 @@ describe('SqliteStore', () => {
     expect(ts.store.getTelegramMessage(-1, 5)?.round).toBe(2);
   });
 
+  it('lists the renders of one sent message, in its chat only and in sequence order', () => {
+    const ts = setup();
+    const p = project('a');
+    ts.store.insertProject(p);
+    const t = task(p.id);
+    ts.store.insertTask(t);
+    const send = (text: string) => ({ kind: 'stuck_card', task_id: t.id, payload: { method: 'sendMessage' as const, params: { text } } });
+    const [mine] = ts.store.enqueueOutbox(-1, [send('card')], null, NOW);
+    ts.store.markOutboxSent(mine!.id, 40, NOW);
+    const [other] = ts.store.enqueueOutbox(-2, [send('other chat')], null, NOW);
+    ts.store.markOutboxSent(other!.id, 40, NOW);
+    const [byRow] = ts.store.enqueueOutbox(-1, [{ kind: 'stuck_card', task_id: t.id, target_outbox_id: mine!.id, payload: { method: 'editMessageText', params: { text: 'closed' } } }], null, NOW);
+    // A sent edit records its target as `sent_message_id`; it is still a render, never a second send.
+    ts.store.markOutboxSent(byRow!.id, 40, NOW);
+    ts.store.enqueueOutbox(-1, [{ kind: 'stale_tap_retire', task_id: t.id, target_message_id: 40, payload: { method: 'editMessageReplyMarkup', params: {} } }], null, NOW);
+    ts.store.enqueueOutbox(-1, [send('unrelated')], null, NOW);
+    expect(ts.store.rendersOfMessage(-1, 40).map((row) => [row.chat_id, row.payload.method])).toEqual([
+      [-1, 'sendMessage'],
+      [-1, 'editMessageText'],
+      [-1, 'editMessageReplyMarkup'],
+    ]);
+    expect(ts.store.rendersOfMessage(-2, 40).map((row) => row.payload.params['text'])).toEqual(['other chat']);
+    expect(ts.store.rendersOfMessage(-1, 41)).toEqual([]);
+  });
+
   it('round-trips callbacks', () => {
     const ts = setup();
     const row = { id: ulid(), command: 'accept', task_id: null, round: 1, args: { finding: 'P1' }, expires_at: null, created_at: NOW };

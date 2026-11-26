@@ -392,11 +392,15 @@ export class Poller {
     return this.#staleAnswer(command.stale, current, chatId, messageId);
   }
 
-  /** `stateToast`, after redrawing the tapped card: `redraw` for the Task's newest card, no buttons for an older one. */
+  /**
+   * `stateToast`, after redrawing the tapped card: `redraw` for the Task's newest card; for an older one its
+   * last text with no buttons (`#lastText`), or only no buttons when it has none.
+   */
   async #staleAnswer(stale: NonNullable<CallbackCommand['stale']>, task: Task, chatId: number | undefined, messageId: number | undefined): Promise<string> {
     if (chatId !== undefined && messageId !== undefined) {
       let redrawn = false;
-      if (this.#isNewestCard(task, chatId, messageId)) {
+      const newest = this.#isNewestCard(task, chatId, messageId);
+      if (newest) {
         try {
           redrawn = await stale.redraw(task);
         } catch (error) {
@@ -404,12 +408,31 @@ export class Poller {
         }
       }
       if (!redrawn) {
-        this.#enqueue(chatId, [
-          { kind: 'stale_tap_retire', task_id: task.id, target_message_id: messageId, payload: { method: 'editMessageReplyMarkup', params: { reply_markup: NO_KEYBOARD } } },
-        ]);
+        // An older card shows the last text meant for it (its close edit may have failed), never buttons again.
+        const text = newest ? undefined : this.#lastText(chatId, messageId);
+        const payload =
+          text === undefined
+            ? { method: 'editMessageReplyMarkup' as const, params: { reply_markup: NO_KEYBOARD } }
+            : { method: 'editMessageText' as const, params: { text, reply_markup: NO_KEYBOARD } };
+        this.#enqueue(chatId, [{ kind: 'stale_tap_retire', task_id: task.id, target_message_id: messageId, payload }]);
       }
     }
     return stateToast(task);
+  }
+
+  /**
+   * The text of the newest send or text edit meant for a message: the state it should show. A render
+   * Telegram refused with a 400 is skipped, since the same text would be refused again; one that only ran
+   * out of retries still counts. Media captions are not read: such a card only loses its buttons.
+   */
+  #lastText(chatId: number, messageId: number): string | undefined {
+    const renders = this.#store.rendersOfMessage(chatId, messageId);
+    for (let i = renders.length - 1; i >= 0; i--) {
+      if (renders[i]!.status === 'failed' && renders[i]!.error?.startsWith('400') === true) continue;
+      const text = renders[i]!.payload.params['text'];
+      if (typeof text === 'string' && text !== '') return text;
+    }
+    return undefined;
   }
 
   /**
