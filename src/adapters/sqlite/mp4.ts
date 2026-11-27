@@ -65,7 +65,8 @@ export async function mp4DurationSeconds(file: string): Promise<number | null> {
       timescale = body.readUInt32BE(12);
       duration = body.readUInt32BE(16);
     }
-    return timescale === 0 ? null : duration / timescale;
+    // A fragmented MP4 leaves the duration 0 in `mvhd`: its length is not known from it.
+    return timescale === 0 || duration === 0 ? null : duration / timescale;
   } finally {
     await handle.close();
   }

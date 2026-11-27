@@ -60,6 +60,13 @@ describe('antipod-evidence (AD-20, DESIGN tokens)', () => {
     expect(await pixel(join(dir, 'callout.png'), 250, 275)).toEqual([255, 255, 255]);
   });
 
+  it('label shrinks a plate that does not fit the image, and keeps the image size', async () => {
+    await solid(join(dir, 'small.png'), 200, 100, '#ffffff');
+    const result = render('label', '--in', join(dir, 'small.png'), '--text', 'AC3 · the rest timer restarts after every set, including the last', '--out', join(dir, 'small-label.png'));
+    expect(result.status, result.stderr).toBe(0);
+    expect(await sharp(join(dir, 'small-label.png')).metadata()).toMatchObject({ width: 200, height: 100 });
+  });
+
   it('bad input exits non-zero with the reason', () => {
     writeFileSync(join(dir, 'not.png'), 'text');
     const missing = render('composite', '--before', join(dir, 'nope.png'), '--after', join(dir, 'before.png'), '--out', join(dir, 'x.png'));

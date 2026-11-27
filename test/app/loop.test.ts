@@ -1,4 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { STUCK_FOOTER } from '../../src/adapters/telegram/cards/stuck-card.ts';
@@ -63,14 +64,22 @@ steps:
  * A container step Runner (AD-24 fake) that plays `results` in order, the last repeating, and writes each
  * log. The `evidence` step instead writes `evidence` (name → content) into its `ANTIPOD_OUT` and exits 0.
  */
-function scriptedRunner(results: Array<StepResult & { log?: string }>, evidence: Record<string, Buffer | string> = {}): { runner: StepRunner; specs: StepSpec[] } {
+type EvidenceScript = Record<string, Buffer | string> | ((out: string, run: number) => void);
+
+function scriptedRunner(results: Array<StepResult & { log?: string }>, evidence: EvidenceScript = {}): { runner: StepRunner; specs: StepSpec[] } {
   const specs: StepSpec[] = [];
+  let evidenceRuns = 0;
   return {
     specs,
     runner: {
       refusal: () => undefined,
       run: async (spec) => {
         if (spec.cmd === EVIDENCE_CMD) {
+          evidenceRuns += 1;
+          if (typeof evidence === 'function') {
+            evidence(spec.env['ANTIPOD_OUT']!, evidenceRuns);
+            return { outcome: 'exited', exit_code: 0 };
+          }
           for (const [name, data] of Object.entries(evidence)) {
             const file = join(spec.env['ANTIPOD_OUT']!, name);
             mkdirSync(dirname(file), { recursive: true });
@@ -124,7 +133,7 @@ let updateId = 0;
 
 async function harness(
   runs: FakeRun[],
-  options: { budget?: number; tests?: Array<StepResult & { log?: string }>; recipe?: string; runner?: StepRunner; evidence?: Record<string, Buffer | string> } = {},
+  options: { budget?: number; tests?: Array<StepResult & { log?: string }>; recipe?: string; runner?: StepRunner; evidence?: EvidenceScript } = {},
 ): Promise<Harness> {
   const home = createTempHome({ owner: { telegram_user_id: OWNER_ID } });
   const fake = fakeClaudeDir(home.root);
@@ -486,19 +495,63 @@ describe('Evidence production, ingest and verification (CAP-21, CAP-22, CAP-23, 
     expect(third).toContain('the Validator gave no verdict for it');
   });
 
-  it('round 2 prior: after a Review, ANTIPOD_PRIOR holds the round-1 files and index.json', async () => {
-    const h = await harness([done('added the timer'), verdict('pass'), produce(), verify(), HOLD], { recipe: EVIDENCE_RECIPE, evidence: EVIDENCE_FILES });
+  it('round 2 prior: ANTIPOD_PRIOR holds the round-1 files and index; the Producer brief lists them and a before_of naming one is stored', async () => {
+    const round1Runs = [done('added the timer'), verdict('pass'), produce(), verify()];
+    const h = await harness([...round1Runs, HOLD], { recipe: EVIDENCE_RECIPE, evidence: EVIDENCE_FILES });
     const prior = join(h.daemon.paths.data, 'prior', 'training', String(h.task.task_no));
     await h.start();
     await vi.waitFor(() => expect(h.stateOf()).toBe('in_review'), { timeout: 20_000 });
     // Round 1: empty.
     expect(readdirSync(prior)).toEqual([]);
-    await h.daemon.coordinator.applyEvent(h.task.id, { type: 'correction' });
-    await vi.waitFor(() => expect(h.briefs()).toHaveLength(5), { timeout: 20_000 });
     const round1 = rows(h, 1);
+    const before = round1.find((row) => row.criterion_id === 'AC1')!;
+    // Round 2: the after video names the round-1 one as its before.
+    setFakeRuns(h.fake, [...round1Runs, done('changed the timer'), verdict('pass'), produce(artifacts().map((a) => (a['criterion_id'] === 'AC1' ? { ...a, before_of: before.id } : a))), HOLD]);
+    await h.daemon.coordinator.applyEvent(h.task.id, { type: 'correction' });
+    await vi.waitFor(() => expect(h.stateOf()).toBe('verifying'), { timeout: 20_000 });
     expect(readdirSync(prior).sort()).toEqual([...round1.map((row) => `${row.id}.${row.kind === 'screencast' ? 'mp4' : 'png'}`), 'index.json'].sort());
     expect(JSON.parse(readFileSync(join(prior, 'index.json'), 'utf8'))).toEqual(round1.map((row) => ({ evidence_id: row.id, criterion_id: row.criterion_id, kind: row.kind })));
-    expect(readFileSync(join(prior, `${round1.find((row) => row.criterion_id === 'AC1')!.id}.mp4`))).toEqual(AC1_VIDEO);
-    expect(h.briefs()[4]).toContain('AC1 [screencast]');
+    expect(readFileSync(join(prior, `${before.id}.mp4`))).toEqual(AC1_VIDEO);
+    const producer = h.briefs()[6]!;
+    expect(producer).toContain(`- ${before.id} · AC1 · screencast`);
+    expect(producer).toContain(realpathSync(prior));
+    const round2 = rows(h, 2);
+    expect(round2).toHaveLength(2);
+    expect(round2.find((row) => row.criterion_id === 'AC1')?.before_of).toBe(before.id);
+  });
+
+  it('a listed name that is a symlink out of ANTIPOD_OUT is refused and nothing is copied', async () => {
+    const outside = join(mkdtempSync(join(tmpdir(), 'antipod-outside-')), 'secret.png');
+    writeFileSync(outside, 'not step output');
+    const h = await harness([done('added the timer'), verdict('pass'), produce(), HOLD], {
+      recipe: EVIDENCE_RECIPE,
+      evidence: (out) => {
+        writeFileSync(join(out, 'timer.mp4'), AC1_VIDEO);
+        mkdirSync(join(out, 'shots'), { recursive: true });
+        symlinkSync(outside, join(out, 'shots', 'default.png'));
+      },
+    });
+    await h.start();
+    await vi.waitFor(() => expect(appliedTypes(h)).toContain('evidence_missing'), { timeout: 20_000 });
+    const missing = h.daemon.store.stageEventsOfTask(h.task.id).find((row) => row.event_type === 'evidence_missing');
+    expect(JSON.parse(missing!.payload)).toMatchObject({ reason: 'shots/default.png is not a file in the output of any step this Stage ran' });
+    expect(rows(h)).toEqual([]);
+    expect(existsSync(join(h.daemon.paths.data, 'evidence', 'training', String(h.task.task_no)))).toBe(false);
+  });
+
+  it('two step runs of one Stage writing the same name: the newer content is ingested', async () => {
+    const h = await harness([done('added the timer'), verdict('pass'), { steps: ['evidence', 'evidence'], structured_output: { artifacts: artifacts() } }, HOLD], {
+      recipe: EVIDENCE_RECIPE,
+      evidence: (out, run) => {
+        writeFileSync(join(out, 'timer.mp4'), AC1_VIDEO);
+        mkdirSync(join(out, 'shots'), { recursive: true });
+        writeFileSync(join(out, 'shots', 'default.png'), `shot from run ${run}`);
+      },
+    });
+    await h.start();
+    await vi.waitFor(() => expect(h.stateOf()).toBe('verifying'), { timeout: 20_000 });
+    expect(h.daemon.store.stepRunsOfStage(h.daemon.store.stagesOfTask(h.task.id, 'evidence-producer')[0]!.id)).toHaveLength(2);
+    const shot = rows(h).find((row) => row.criterion_id === 'AC2')!;
+    expect(readFileSync(join(h.daemon.paths.data, shot.path), 'utf8')).toBe('shot from run 2');
   });
 });

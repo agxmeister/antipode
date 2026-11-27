@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -22,5 +23,8 @@ describe('Evidence in the daemon (AD-8, AD-18, AD-20)', () => {
     const paths = ensureHome(createTempHome().root);
     writeAntipodShim(paths);
     for (const name of ['antipod', 'antipod-evidence']) expect(statSync(join(paths.runBin, name)).mode & 0o777).toBe(0o755);
+    const run = spawnSync(join(paths.runBin, 'antipod-evidence'), [], { encoding: 'utf8' });
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain('Usage: antipod-evidence');
   });
 });

@@ -30,8 +30,3 @@ export function mp4Bytes(seconds: number, options: { version?: 0 | 1; moovLast?:
   return Buffer.concat(options.moovLast === true ? [ftyp, mdat, moov] : [ftyp, moov, mdat]);
 }
 
-/** A 1×1 PNG. */
-export const PNG_1PX = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-  'base64',
-);

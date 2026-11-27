@@ -101,6 +101,8 @@ describe('SqliteEvidenceStore (AD-8)', () => {
     expect(await mp4DurationSeconds(write('b.mov', mp4Bytes(61, { version: 1, timescale: 600 })))).toBe(61);
     expect(await mp4DurationSeconds(write('c.m4v', mp4Bytes(30, { moovLast: true })))).toBe(30);
     expect((await evidence.probe(write('d.mp4', 'not a movie at all'))).durationS).toBeNull();
+    // A fragmented MP4 has duration 0 in mvhd: unreadable, not 0 s.
+    expect((await evidence.probe(write('e.mp4', mp4Bytes(0)))).durationS).toBeNull();
   });
 
   it('stepRunsOfStage lists a Stage’s step runs newest first', () => {
