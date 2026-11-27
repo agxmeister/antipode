@@ -81,3 +81,9 @@
   summary: Redraw an older card's text on a stale tap, not only remove its buttons, if the Owner wants it "edited to its current state" in full.
   evidence: `#staleAnswer` strips the keyboard of a card that is not the Task's newest; its text (e.g. a Stuck card whose close edit failed) keeps the reason and footer. Rare: it needs a failed close edit. EXPERIENCE.md says the tapped card is edited to its current state.
   resolved: implemented in `docs/implementation-artifacts/spec-1-9-older-card-redraw.md`.
+- source_spec: `docs/implementation-artifacts/spec-1-10-evidence-production-ingest-and-rendering.md`
+  summary: Route through `bmad-correct-course` adding `evidence_rejected` to spine AD-5's list of causes that count against the Iteration Budget.
+  evidence: SPEC CAP-13 counts "missing or rejected Evidence" but AD-5 omits `evidence_rejected`; Owner decision 2026-11-27: the SPEC wins, implemented in 1-10.
+- source_spec: `docs/implementation-artifacts/spec-1-10-evidence-production-ingest-and-rendering.md`
+  summary: Send the last Evidence as media before the Stuck card (EXPERIENCE.md Stuck card), together with the Evidence messages.
+  evidence: Deferred by 1-9 to 1-10; Owner decision 2026-11-27 moves it to 1-11, which builds media sending.
