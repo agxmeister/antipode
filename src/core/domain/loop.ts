@@ -85,13 +85,28 @@ export interface LastLap {
   testFailure?: TestOutput;
   /** The Triage reason that sent the Task back. */
   triageReason?: string;
+  /** Why ingest rejected the Evidence Producer's output (`evidence_missing`, AD-8). */
+  evidenceMissing?: string;
+  /** The Evidence-mode Validator output that rejected the Evidence (`evidence_rejected`). */
+  evidenceRejected?: ValidatorOutput;
+}
+
+/** The `evidence_missing` reason when ingest gave none. */
+export const EVIDENCE_MISSING_REASON = 'the Evidence Producer listed no usable Evidence';
+
+/** The applied event that a Stage's output mapped to, if any. */
+function appliedEventOf(events: readonly StageEventRow[], stageId: string): StageEventRow | undefined {
+  return events.find((row) => row.status === 'applied' && row.stage_id === stageId && row.event_type !== 'stage_started' && row.event_type !== 'stage_failed');
 }
 
 /**
  * The outputs of the Stages since the latest Implementer output, ignoring `current` (the Stage being
- * briefed): the last lap's blocking findings, a failed test, Triage's reason. Undefined before the first lap.
+ * briefed): the last lap's blocking findings, a failed test, Triage's reason, and with the Task's
+ * `events` the `evidence_missing` reason and the Evidence-mode verdicts that rejected the Evidence.
+ * A Validator after the lap's Evidence Producer judged Evidence, not the Branch, so its findings are
+ * not the lap's. Undefined before the first lap.
  */
-export function lastLapOf(stages: readonly Stage[], current?: string): LastLap | undefined {
+export function lastLapOf(stages: readonly Stage[], current?: string, events: readonly StageEventRow[] = []): LastLap | undefined {
   const done = stages.filter((stage) => stage.id !== current && stage.output !== undefined && stage.output !== null);
   let start = -1;
   for (let i = done.length - 1; i >= 0; i--) {
@@ -104,8 +119,22 @@ export function lastLapOf(stages: readonly Stage[], current?: string): LastLap |
   const implementer = implementerOutputOf(done[start]!);
   if (implementer === undefined) return undefined;
   const lap: LastLap = { implementer, blocking: [], nonblocking: [] };
+  let evidenced = false;
   for (const stage of done.slice(start + 1)) {
+    if (stage.role === 'evidence-producer') {
+      evidenced = true;
+      const event = appliedEventOf(events, stage.id);
+      if (event?.event_type === 'evidence_missing') {
+        const reason = (JSON.parse(event.payload) as { reason?: unknown }).reason;
+        lap.evidenceMissing = typeof reason === 'string' && reason !== '' ? reason : EVIDENCE_MISSING_REASON;
+      }
+      continue;
+    }
     const validator = validatorOutputOf(stage);
+    if (validator !== undefined && evidenced) {
+      if (appliedEventOf(events, stage.id)?.event_type === 'evidence_rejected') lap.evidenceRejected = validator;
+      continue;
+    }
     if (validator !== undefined) {
       lap.blocking = validator.findings.filter((finding) => finding.blocking);
       lap.nonblocking = validator.findings.filter((finding) => !finding.blocking);

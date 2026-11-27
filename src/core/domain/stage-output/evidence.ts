@@ -12,6 +12,7 @@ export const evidenceArtifactSchema = z.strictObject({
   before_of: z.string().min(1).optional(),
   caption: z.string().min(1),
 });
+export type EvidenceArtifact = z.infer<typeof evidenceArtifactSchema>;
 
 /** What an Evidence Producer Stage returns (AD-8). */
 export const evidenceOutputSchema = z.strictObject({

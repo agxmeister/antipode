@@ -145,6 +145,8 @@ export interface Store {
   /** Records how a step run ended. */
   finishStepRun(id: string, end: StepRunEnd): void;
   stepRunsInStatus(statuses: readonly StepRunStatus[]): StepRun[];
+  /** The step runs a Stage asked for, newest first. */
+  stepRunsOfStage(stageId: string): StepRun[];
 
   /** Takes the lease on `lease.capability` in one transaction; false, inserting nothing, when any lease on it exists (AD-7). */
   acquireLease(lease: CapabilityLease): boolean;

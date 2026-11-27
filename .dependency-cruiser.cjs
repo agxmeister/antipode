@@ -38,6 +38,13 @@ module.exports = {
       to: { path: '^src/adapters/', pathNot: '^src/adapters/$1/' },
     },
     {
+      name: 'sharp-only-in-evidence-render',
+      comment: 'One renderer for generated imagery: only adapters/evidence-render uses sharp (AD-20).',
+      severity: 'error',
+      from: { path: '^src/', pathNot: '^src/adapters/evidence-render/' },
+      to: { path: ['(^|/)node_modules/sharp/', '(^|/)node_modules/\\.pnpm/sharp@[^/]+/node_modules/sharp/'] },
+    },
+    {
       name: 'no-adapter-to-app',
       comment: 'Adapters import core/, never the composition root in app/ (AD-1).',
       severity: 'error',

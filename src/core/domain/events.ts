@@ -66,7 +66,8 @@ export const eventSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('parked'), stage_id: stageId, reason: z.string().min(1).optional(), usage }),
   z.strictObject({ type: z.literal('reason_written'), stage_id: stageId, reason: z.string().min(1), usage }),
   fromAgent('evidence_produced'),
-  fromAgent('evidence_missing'),
+  // Why ingest rejected the Evidence Producer's output; the next Implementer brief carries it (AD-8).
+  z.strictObject({ type: z.literal('evidence_missing'), stage_id: stageId, reason: z.string().min(1).optional(), usage }),
   fromAgent('evidence_rejected'),
   fromAgent('evidence_verified'),
   // Review, Integration and Release

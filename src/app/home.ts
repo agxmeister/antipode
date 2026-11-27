@@ -20,7 +20,7 @@ export interface HomePaths {
   pidFile: string;
   /** `$ANTIPOD_HOME/roles/`: Owner-level Role Config overrides (AD-15). */
   roles: string;
-  /** `run/bin/`: put first on every Stage's `PATH`; holds the `antipod` shim. */
+  /** `run/bin/`: put first on every Stage's `PATH`; holds the `antipod` and `antipod-evidence` shims. */
   runBin: string;
 }
 
@@ -58,22 +58,34 @@ export function ensureHome(root: string): HomePaths {
   return paths;
 }
 
+/** The Evidence renderer's command (AD-20), the package's second `bin`. */
+export const EVIDENCE_CLI = 'antipod-evidence';
+
 /** Quotes `value` for a POSIX shell. */
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-/**
- * Writes `run/bin/antipod` (mode 755): runs this package's CLI with the daemon's Node, so a Stage
- * reaches `antipod step` on its `PATH` (AD-6). Rewritten at every boot; returns its path.
- */
-export function writeAntipodShim(paths: HomePaths, node: string = process.execPath): string {
-  const cli = fileURLToPath(new URL(`./cli${extname(fileURLToPath(import.meta.url))}`, import.meta.url));
+/** Writes the shim `run/bin/<name>` (mode 755) that runs `script` with `node`, atomically. */
+function writeShim(paths: HomePaths, name: string, node: string, script: string): string {
   mkdirSync(paths.runBin, { recursive: true, mode: 0o700 });
-  const shim = join(paths.runBin, 'antipod');
+  const shim = join(paths.runBin, name);
   const staging = `${shim}.${process.pid}`;
-  writeFileSync(staging, `#!/bin/sh\nexec ${shellQuote(node)} ${shellQuote(cli)} "$@"\n`, { mode: 0o755 });
+  writeFileSync(staging, `#!/bin/sh\nexec ${shellQuote(node)} ${shellQuote(script)} "$@"\n`, { mode: 0o755 });
   chmodSync(staging, 0o755);
   renameSync(staging, shim);
   return shim;
+}
+
+/**
+ * Writes `run/bin/antipod` and `run/bin/antipod-evidence` (mode 755): each runs this package's CLI with
+ * the daemon's Node, so a Stage reaches `antipod step` (AD-6) and the Evidence renderer (AD-20) on its
+ * `PATH`. Rewritten at every boot; returns the path of `antipod`.
+ */
+export function writeAntipodShim(paths: HomePaths, node: string = process.execPath): string {
+  const ext = extname(fileURLToPath(import.meta.url));
+  const cli = fileURLToPath(new URL(`./cli${ext}`, import.meta.url));
+  const render = fileURLToPath(new URL(`../adapters/evidence-render/cli${ext}`, import.meta.url));
+  writeShim(paths, EVIDENCE_CLI, node, render);
+  return writeShim(paths, 'antipod', node, cli);
 }

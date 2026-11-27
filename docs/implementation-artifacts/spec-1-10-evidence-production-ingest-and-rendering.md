@@ -2,7 +2,8 @@
 title: 'Evidence production, ingest and rendering'
 type: 'feature'
 created: '2026-11-27'
-status: 'ready-for-dev'
+status: 'in-progress'
+baseline_commit: 'a472936beb2c9280e2acc9daa561ff54ca50c0ef'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -88,11 +89,11 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Migration, `EvidenceStore` port and adapter, store `stepRunsOfStage` -- AD-2, AD-8
-- [ ] `evidence-ingest.ts` and `src/app/evidence.ts` hook, prior builder, boot sweep -- AD-7, AD-8, AD-18
-- [ ] `stages.ts`, `loop.ts` and roles -- Evidence-mode brief and verdict rule, Implementer brief lines -- AD-21
-- [ ] `adapters/evidence-render/`, `package.json`, `home.ts` -- renderer CLI and shim -- AD-20
-- [ ] `test/**` -- one test per matrix row; a renderer test that checks output size and the plate pixel colour -- AD-24
+- [x] Migration, `EvidenceStore` port and adapter, store `stepRunsOfStage` -- AD-2, AD-8
+- [x] `evidence-ingest.ts` and `src/app/evidence.ts` hook, prior builder, boot sweep -- AD-7, AD-8, AD-18
+- [x] `stages.ts`, `loop.ts` and roles -- Evidence-mode brief and verdict rule, Implementer brief lines -- AD-21
+- [x] `adapters/evidence-render/`, `package.json`, `home.ts` -- renderer CLI and shim -- AD-20
+- [x] `test/**` -- one test per matrix row; a renderer test that checks output size and the plate pixel colour -- AD-24
 
 **Acceptance Criteria:**
 - Given a scripted fake `claude` (Implementer `done`, Validator `pass`, Evidence Producer listing one artifact per criterion written by a fake `evidence` step, and the Validator in Evidence mode verifying them all), when an approved Task runs, then it reaches `in_review` with `review_round` 1. One unsuperseded row per artifact exists, and each file under `data/evidence/<project>/<n>/r1/` is byte-identical to the step output.

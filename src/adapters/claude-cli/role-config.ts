@@ -44,6 +44,8 @@ export interface RoleVars {
   /** The Stage's `cwd`: the Task worktree, or `_main` for Intake. */
   WORKTREE: string;
   ANTIPOD_PRIOR: string;
+  /** `data/evidence/<project>/<task_no>`: the Task's Evidence directory, which the Validator reads (AD-8). */
+  EVIDENCE_DIR: string;
   /** Every worktree but the Stage's own; a rule naming it is repeated once per entry and dropped when there is none. */
   OTHER_WORKTREES: readonly string[];
 }
@@ -80,7 +82,7 @@ export function expandPermissions(role: string, permissions: Permissions, vars: 
   const replace = (rule: string, other: string | undefined): string =>
     // A function replacer, so `$&`-style patterns in a path are taken literally.
     rule.replace(PLACEHOLDER, (match, name: string) => {
-      if (name === 'ANTIPOD_HOME' || name === 'WORKTREE' || name === 'ANTIPOD_PRIOR') return vars[name];
+      if (name === 'ANTIPOD_HOME' || name === 'WORKTREE' || name === 'ANTIPOD_PRIOR' || name === 'EVIDENCE_DIR') return vars[name];
       if (name === 'OTHER_WORKTREES' && other !== undefined) return other;
       throw new RoleConfigInvalidError(role, `permissions.json uses unknown placeholder ${match}`);
     });

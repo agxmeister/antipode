@@ -274,6 +274,7 @@ export class SqliteStore implements Store {
     insertStepRun: Statement;
     getStepRun: Statement;
     finishStepRun: Statement;
+    stepRunsOfStage: Statement;
     acquireLease: Statement;
     releaseLease: Statement;
     listLeases: Statement;
@@ -401,6 +402,7 @@ export class SqliteStore implements Store {
       finishStepRun: db.prepare(
         'UPDATE step_runs SET status = @status, outcome = @outcome, exit_code = @exit_code, reason = @reason, ended_at = @ended_at WHERE id = @id',
       ),
+      stepRunsOfStage: db.prepare('SELECT * FROM step_runs WHERE stage_id = ? ORDER BY id DESC'),
       acquireLease: db.prepare(
         'INSERT INTO capability_leases (capability, task_id, step_run_id, acquired_at) VALUES (@capability, @task_id, @step_run_id, @acquired_at) ON CONFLICT (capability) DO NOTHING',
       ),
@@ -793,6 +795,10 @@ export class SqliteStore implements Store {
       .prepare(`SELECT * FROM step_runs WHERE status IN (${placeholders(statuses.length)}) ORDER BY id`)
       .all(...statuses)
       .map((row) => stepRunSchema.parse(row));
+  }
+
+  stepRunsOfStage(stageId: string): StepRun[] {
+    return this.#stmt.stepRunsOfStage.all(stageId).map((row) => stepRunSchema.parse(row));
   }
 
   acquireLease(lease: CapabilityLease): boolean {

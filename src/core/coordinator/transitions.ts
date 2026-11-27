@@ -104,6 +104,7 @@ export const COUNTING_CAUSES: ReadonlySet<EventType> = new Set<EventType>([
   'blocking_findings',
   'rerun',
   'evidence_missing',
+  'evidence_rejected',
   'test_failed',
   'rebase_or_revalidation_failed',
 ]);

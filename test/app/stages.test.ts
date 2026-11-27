@@ -8,7 +8,7 @@ import { GitRepo } from '../../src/adapters/git/repo.ts';
 import { systemClock } from '../../src/app/clock.ts';
 import { bootDaemon, type BootOptions, type Daemon } from '../../src/app/daemon.ts';
 import { ensureHome, PACKAGE_ROLES } from '../../src/app/home.ts';
-import { eventForOutput, fenceFor, LAUNCH, renderLoopBrief, Stages, UNHANDLED_OUTPUT, type LoopBrief } from '../../src/app/stages.ts';
+import { eventForOutput, fenceFor, LAUNCH, NO_VERDICT_NOTE, rejectedEvidence, renderLoopBrief, Stages, UNHANDLED_OUTPUT, type LoopBrief } from '../../src/app/stages.ts';
 import { Coordinator } from '../../src/core/coordinator/coordinator.ts';
 import { taskSchema } from '../../src/core/domain/task.ts';
 import { createTempRemote } from '../helpers/git.ts';
@@ -505,6 +505,17 @@ describe('eventForOutput (AD-4 discriminators, Owner decision 2026-11-15)', () =
     expect(eventForOutput('implementer', 'implementing', { status: 'done', summary: 'x' }, 's', usage)?.type).toBe('implementer_done');
   });
 
+  it('Evidence mode needs a shows_criterion verdict for every current-round row; anything less is rejected', () => {
+    const v = (id: string, shows = true) => ({ evidence_id: id, shows_criterion: shows, note: 'n' });
+    const out = (verdicts: ReturnType<typeof v>[], verdict = 'pass') => ({ verdict, findings: [], evidence_verdicts: verdicts });
+    const ids = ['E1', 'E2'];
+    expect(eventForOutput('validator', 'verifying', out([v('E1'), v('E2')]), 's', usage, ids)?.type).toBe('evidence_verified');
+    expect(eventForOutput('validator', 'verifying', out([v('E1')]), 's', usage, ids)?.type).toBe('evidence_rejected');
+    expect(eventForOutput('validator', 'verifying', out([v('E1'), v('E2', false)]), 's', usage, ids)?.type).toBe('evidence_rejected');
+    expect(eventForOutput('validator', 'verifying', out([v('E1'), v('E2'), v('X', false)]), 's', usage, ids)?.type).toBe('evidence_rejected');
+    expect(eventForOutput('validator', 'verifying', out([v('E1'), v('E2')], 'nonblocking'), 's', usage, ids)?.type).toBe('evidence_rejected');
+  });
+
   it('maps Implementer blocked to implementer_blocked; leaves EvidenceOutput and OwnerInstruction to output hooks', () => {
     expect(eventForOutput('implementer', 'implementing', { status: 'blocked', summary: 'x' }, 's', usage)).toEqual({ type: 'implementer_blocked', stage_id: 's', usage });
     expect(eventForOutput('evidence', 'evidencing', { artifacts: [] }, 's', usage)).toBeUndefined();
@@ -562,6 +573,31 @@ describe('renderLoopBrief (AD-21, CAP-19)', () => {
     const implementer = renderLoopBrief({ ...base, lastLap: { ...lastLap, blocking: [], testFailure: undefined, triageReason: 'retry with a stub' } });
     expect(implementer).toContain('The previous Implementer reported itself blocked: need the sandbox key');
     expect(implementer).toContain("Triage's reason: retry with a stub");
+  });
+
+  it('Evidence mode lists each current row; the Producer reads the prior index; the Implementer reads a refusal or a rejection', () => {
+    const evidence = [{ id: 'E1', criterion_id: 'AC1', kind: 'screencast', caption: 'timer runs', degraded: 'emulator', file: '/d/evidence/training/4/r1/E1.mp4' }];
+    const verifier = renderLoopBrief({ ...base, role: 'validator', verifying: true, evidence });
+    expect(verifier).toContain('- E1 · AC1 · screencast · timer runs · degraded: emulator · /d/evidence/training/4/r1/E1.mp4');
+    expect(verifier).not.toContain('Judge the Branch');
+    const producer = renderLoopBrief({ ...base, role: 'evidence-producer', prior: [{ evidence_id: 'P1', criterion_id: 'AC1', kind: 'screenshot' }], priorDir: '/d/prior/training/4' });
+    expect(producer).toContain('relative to the `ANTIPOD_OUT`');
+    expect(producer).toContain('- P1 · AC1 · screenshot');
+    const lap = { implementer: { status: 'done' as const, summary: 'added it' }, blocking: [], nonblocking: [] };
+    expect(renderLoopBrief({ ...base, lastLap: { ...lap, evidenceMissing: 'no Evidence for AC2' } })).toContain("The Evidence Producer's output was refused: no Evidence for AC2");
+    const evidenceRejected = { verdict: 'pass' as const, findings: [], evidence_verdicts: [{ evidence_id: 'E1', shows_criterion: false, note: 'label cut off' }] };
+    const rows = [
+      { id: 'E1', task_id: 't', round: 1, criterion_id: 'AC1', kind: 'screencast' as const, path: 'p', bytes: 1, degraded: null, before_of: null, caption: 'c', stage_id: null, superseded: false, created_at: '2026-11-27T12:00:00.000Z' },
+      { id: 'E2', task_id: 't', round: 1, criterion_id: 'AC2', kind: 'screenshot' as const, path: 'q', bytes: 1, degraded: null, before_of: null, caption: 'c', stage_id: null, superseded: false, created_at: '2026-11-27T12:00:00.000Z' },
+    ];
+    const rejected = rejectedEvidence(evidenceRejected, rows);
+    expect(rejected).toEqual([
+      { evidence_id: 'E1', criterion_id: 'AC1', note: 'label cut off' },
+      { evidence_id: 'E2', criterion_id: 'AC2', note: NO_VERDICT_NOTE },
+    ]);
+    const implementer = renderLoopBrief({ ...base, lastLap: { ...lap, evidenceRejected }, rejected });
+    expect(implementer).toContain('The Validator rejected the Evidence:');
+    expect(implementer).toContain('- E1 (AC1): label cut off');
   });
 
   it('a log tail with backtick fences cannot close the fence around it', () => {

@@ -3,6 +3,7 @@ import { Api } from 'grammy';
 import { migrate } from '../adapters/sqlite/migrate.ts';
 import { openDatabase, type SqliteDatabase } from '../adapters/sqlite/db.ts';
 import { SqliteStore } from '../adapters/sqlite/store.ts';
+import { SqliteEvidenceStore } from '../adapters/sqlite/evidence-store.ts';
 import { ClaudeCliRunner } from '../adapters/claude-cli/runner.ts';
 import { RoleConfigResolver } from '../adapters/claude-cli/role-config.ts';
 import { GitRepo } from '../adapters/git/repo.ts';
@@ -27,6 +28,7 @@ import { acquirePidLock } from './pid-lock.ts';
 import { Registration, REGISTER_USAGE } from './registration.ts';
 import { readInstanceSecrets } from './secrets.ts';
 import { SOCKET_FILE, startStepSocket, type StepSocket } from './step-socket.ts';
+import { Evidence, EVIDENCE_PRODUCER_ROLE } from './evidence.ts';
 import { Intake } from './intake.ts';
 import { INTAKE_ROLE, Stages } from './stages.ts';
 import { recoverSteps, Steps } from './steps.ts';
@@ -65,6 +67,8 @@ export interface Daemon {
   readonly testStep: TestStep;
   /** Drafts from Owner text and the inbox, the Draft card's commands and the Branch effects (CAP-6..9). */
   readonly intake: Intake;
+  /** Evidence rows and files (AD-8). */
+  readonly evidenceStore: SqliteEvidenceStore;
   config(): Config;
   /** Re-reads `config.yaml`; keeps the previous config when it is invalid. Returns whether it applied. */
   reload(): boolean;
@@ -135,6 +139,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
   let stages: Stages;
   let testStep: TestStep;
   let intake: Intake;
+  let evidenceStore: SqliteEvidenceStore;
   let stepSocket: StepSocket | undefined;
   /** `/register` jobs in flight; `stop()` waits for them before the database closes. */
   const jobs = new Set<Promise<void>>();
@@ -146,6 +151,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
 
     // Composition (AD-1): the core sees only ports; handlers for later stories plug in here.
     store = new SqliteStore(db);
+    evidenceStore = new SqliteEvidenceStore(db, paths.data);
     coordinator = new Coordinator({
       store,
       clock,
@@ -267,12 +273,15 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       dataDir: paths.data,
       secretsDir: paths.secrets,
       runBin: paths.runBin,
+      evidence: evidenceStore,
       config: () => ({ roles: config.roles, agent: config.agent, intake: config.intake }),
       clock,
       baseEnv: options.env ?? process.env,
       log: logger,
     });
     stages.setOutputHook(INTAKE_ROLE, draftIntake.outputHook);
+    const evidence = new Evidence({ store, evidence: evidenceStore, dataDir: paths.data, clock, log: logger });
+    stages.setOutputHook(EVIDENCE_PRODUCER_ROLE, evidence.outputHook);
     executor.register('start_stage', (effect) => stages.startStage(effect));
     testStep = new TestStep({ store, coordinator, repo: gitRepo, steps, log: logger });
     const tests = testStep;
@@ -289,6 +298,8 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
       removeOrphans: () => podman.removeOrphans(),
       log: logger,
     });
+    // A file copied by an ingest whose rows never committed does not exist to the system (AD-8, AD-18).
+    const evidenceSwept = await evidence.sweepOrphans();
     const recovery = await recover({ store, coordinator, executor, clock, log: logger });
     // Attached after recovery so nothing drains until recovery has settled the orphaned launches.
     coordinator.onEffectsCommitted(() => executor.notify());
@@ -303,6 +314,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
         schema_version: result.to,
         migrations_applied: result.applied,
         ...stepRecovery,
+        evidence_files_swept: evidenceSwept,
         ...recovery,
       },
       'daemon_started',
@@ -362,6 +374,7 @@ export async function bootDaemon(options: BootOptions = {}): Promise<Daemon> {
     stages,
     testStep,
     intake,
+    evidenceStore,
     tick: onTick,
     config: () => config,
     reload() {

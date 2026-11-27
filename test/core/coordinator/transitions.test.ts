@@ -265,6 +265,14 @@ describe('Iteration Budget (AD-3)', () => {
     expect(outcome.startStage).toBeDefined();
   });
 
+  it('the counting causes are exactly the AD-3 list: rejected Evidence costs a unit (Owner decision 2026-11-27)', () => {
+    expect([...COUNTING_CAUSES].sort()).toEqual(
+      ['blocking_findings', 'evidence_missing', 'evidence_rejected', 'rebase_or_revalidation_failed', 'rerun', 'scheduler_start', 'test_failed'],
+    );
+    const rejected = applied(transition(task('verifying', { budget_used: 2 }), stage('verifying'), sample('evidence_rejected'), ctx()));
+    expect(rejected.patch.budget_used).toBe(3);
+  });
+
   it('a counting entry with the budget used up derives budget_spent and starts no Stage', () => {
     const outcome = applied(transition(task('testing', { budget_used: 5, budget_limit: 5 }), stage('testing'), sample('test_failed'), ctx()));
     expect(outcome.next).toBe('implementing');

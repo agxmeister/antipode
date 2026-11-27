@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { STUCK_FOOTER } from '../../src/adapters/telegram/cards/stuck-card.ts';
@@ -9,6 +9,7 @@ import type { StepResult, StepRunner, StepSpec } from '../../src/core/ports/step
 import { fakeCalls, fakeClaudeDir, pathWithFakeClaude, setFakeRuns, type FakeRun } from '../helpers/claude.ts';
 import { fakeClock } from '../helpers/clock.ts';
 import { createTempRemote, git, validRecipe, type TempRemote } from '../helpers/git.ts';
+import { mp4Bytes } from '../helpers/evidence.ts';
 import { createTempHome, OWNER_ID } from '../helpers/home.ts';
 import { CHAT_ID, fakeTelegram, tapUpdate, type FakeTelegram } from '../helpers/telegram.ts';
 
@@ -48,14 +49,35 @@ function hangingRunner(): { runner: StepRunner; specs: StepSpec[]; aborted: () =
   };
 }
 
-/** A container step Runner (AD-24 fake) that plays `results` in order, the last repeating, and writes each log. */
-function scriptedRunner(results: Array<StepResult & { log?: string }>): { runner: StepRunner; specs: StepSpec[] } {
+/** The `cmd` of the fake `evidence` step: it writes `evidence` files into its `ANTIPOD_OUT`. */
+const EVIDENCE_CMD = 'make-evidence';
+/** A Recipe whose `evidence` step is a container step the scripted Runner plays. */
+const EVIDENCE_RECIPE = `name: training
+evidence_kinds: [screenshot, screencast, file]
+steps:
+  test:     { runner: container, image: busybox, cmd: run-tests, timeout: 1m }
+  evidence: { runner: container, image: busybox, cmd: ${EVIDENCE_CMD}, timeout: 1m }
+`;
+
+/**
+ * A container step Runner (AD-24 fake) that plays `results` in order, the last repeating, and writes each
+ * log. The `evidence` step instead writes `evidence` (name → content) into its `ANTIPOD_OUT` and exits 0.
+ */
+function scriptedRunner(results: Array<StepResult & { log?: string }>, evidence: Record<string, Buffer | string> = {}): { runner: StepRunner; specs: StepSpec[] } {
   const specs: StepSpec[] = [];
   return {
     specs,
     runner: {
       refusal: () => undefined,
       run: async (spec) => {
+        if (spec.cmd === EVIDENCE_CMD) {
+          for (const [name, data] of Object.entries(evidence)) {
+            const file = join(spec.env['ANTIPOD_OUT']!, name);
+            mkdirSync(dirname(file), { recursive: true });
+            writeFileSync(file, data);
+          }
+          return { outcome: 'exited', exit_code: 0 };
+        }
         const result = results[Math.min(specs.length, results.length - 1)]!;
         specs.push(spec);
         mkdirSync(dirname(spec.logPath), { recursive: true });
@@ -100,7 +122,10 @@ interface Harness {
 
 let updateId = 0;
 
-async function harness(runs: FakeRun[], options: { budget?: number; tests?: Array<StepResult & { log?: string }>; recipe?: string; runner?: StepRunner } = {}): Promise<Harness> {
+async function harness(
+  runs: FakeRun[],
+  options: { budget?: number; tests?: Array<StepResult & { log?: string }>; recipe?: string; runner?: StepRunner; evidence?: Record<string, Buffer | string> } = {},
+): Promise<Harness> {
   const home = createTempHome({ owner: { telegram_user_id: OWNER_ID } });
   const fake = fakeClaudeDir(home.root);
   setFakeRuns(fake, runs);
@@ -109,7 +134,7 @@ async function harness(runs: FakeRun[], options: { budget?: number; tests?: Arra
   const tg = fakeTelegram();
   tg.respond('getChat', (payload) => ({ id: payload['chat_id'], type: 'supergroup', title: 'Antipode · Training' }));
   tg.respond('getMe', () => ({ id: 1, is_bot: true, first_name: 'Antipode', username: 'antipode_bot', can_read_all_group_messages: true }));
-  const { runner, specs } = scriptedRunner(options.tests ?? [{ outcome: 'exited', exit_code: 0 }]);
+  const { runner, specs } = scriptedRunner(options.tests ?? [{ outcome: 'exited', exit_code: 0 }], options.evidence);
   const daemon = await bootDaemon({
     env: { ...home.env, PATH: pathWithFakeClaude() },
     clock: fakeClock(),
@@ -372,5 +397,108 @@ describe('the implement, validate and triage loop (CAP-13, CAP-19, CAP-20)', () 
     expect(h.daemon.store.getTask(h.task.id)?.stuck_reason).toMatch(/^test Stage failed 3 times; last failure: push: /);
     expect(String(h.stuckSends()[0]!['text'])).toContain('test Stage failed 3 times; last failure: push: ');
     expect(h.specs).toEqual([]);
+  });
+});
+
+const AC1_VIDEO = mp4Bytes(8);
+const AC2_SHOT = Buffer.from('fake png: default is 90 s');
+const EVIDENCE_FILES = { 'timer.mp4': AC1_VIDEO, 'shots/default.png': AC2_SHOT };
+const artifacts = (extra: Array<Record<string, unknown>> = []) => [
+  { name: 'timer.mp4', criterion_id: 'AC1', kind: 'screencast', degraded: null, caption: 'the timer starts after a set' },
+  { name: 'shots/default.png', criterion_id: 'AC2', kind: 'screenshot', degraded: 'emulator only', caption: 'the default is 90 s' },
+  ...extra,
+];
+/** The Evidence Producer: runs the fake `evidence` step, then lists `list`. */
+const produce = (list: Array<Record<string, unknown>> = artifacts()): FakeRun => ({ steps: ['evidence'], structured_output: { artifacts: list } });
+const verify = (spec: FakeRun['verifyEvidence'] = {}): FakeRun => ({ verifyEvidence: spec });
+
+describe('Evidence production, ingest and verification (CAP-21, CAP-22, CAP-23, CAP-25; AD-7, AD-8)', () => {
+  function rows(h: Harness, round = 1) {
+    return h.daemon.evidenceStore.evidenceOf(h.task.id, round);
+  }
+
+  it('happy: one artifact per criterion is ingested under r1, verified, and the Task reaches in_review with review_round 1 (AC 1)', async () => {
+    const h = await harness([done('added the timer'), verdict('pass'), produce(), verify()], { recipe: EVIDENCE_RECIPE, evidence: EVIDENCE_FILES });
+    await h.start();
+    await vi.waitFor(() => expect(h.stateOf()).toBe('in_review'), { timeout: 20_000 });
+    expect(h.daemon.store.getTask(h.task.id)).toMatchObject({ review_round: 1, budget_used: 1 });
+    expect(appliedTypes(h)).toEqual(expect.arrayContaining(['evidence_produced', 'evidence_verified']));
+    const evidence = rows(h);
+    expect(evidence).toHaveLength(2);
+    expect(evidence.every((row) => !row.superseded)).toBe(true);
+    const dir = join(h.daemon.paths.data, 'evidence', 'training', String(h.task.task_no), 'r1');
+    expect(readdirSync(dir).sort()).toEqual(evidence.map((row) => `${row.id}.${row.kind === 'screencast' ? 'mp4' : 'png'}`).sort());
+    // Byte-identical to the step output.
+    const run = h.daemon.store.stepRunsOfStage(h.daemon.store.stagesOfTask(h.task.id, 'evidence-producer')[0]!.id)[0]!;
+    const out = join(h.daemon.paths.data, 'steps', run.id, 'out');
+    const byCriterion = Object.fromEntries(evidence.map((row) => [row.criterion_id, row]));
+    expect(readFileSync(join(h.daemon.paths.data, byCriterion['AC1']!.path))).toEqual(readFileSync(join(out, 'timer.mp4')));
+    expect(readFileSync(join(h.daemon.paths.data, byCriterion['AC2']!.path))).toEqual(AC2_SHOT);
+    expect(byCriterion['AC2']).toMatchObject({ kind: 'screenshot', degraded: 'emulator only', caption: 'the default is 90 s', round: 1, bytes: AC2_SHOT.length });
+    // The Evidence-mode brief lists every row with its criterion, kind, caption, degraded reason and file.
+    const brief = h.briefs()[3]!;
+    expect(brief).toContain('### Evidence to judge');
+    expect(brief).toContain(`- ${byCriterion['AC2']!.id} · AC2 · screenshot · the default is 90 s · degraded: emulator only · `);
+    expect(brief).toMatch(new RegExp(`${byCriterion['AC1']!.id}\\.mp4$`, 'm'));
+    // The Producer's brief says where names are relative to; round 1 has no prior Evidence.
+    expect(h.briefs()[2]).toContain('`ANTIPOD_PRIOR` is empty');
+    // The Validator may read the Task's Evidence directory.
+    const verifier = h.daemon.store.stagesOfTask(h.task.id, 'validator').at(-1)!;
+    const permissions = readFileSync(join(h.daemon.paths.data, 'stages', verifier.id, 'role', 'permissions.json'), 'utf8');
+    expect(permissions).toContain(`/evidence/training/${h.task.task_no}/**)`);
+  });
+
+  it('missing AC: evidence_missing "no Evidence for AC2" costs a unit, copies nothing, and the next Implementer reads the reason', async () => {
+    const h = await harness([done('added the timer'), verdict('pass'), produce(artifacts().slice(0, 1)), done('added AC2 evidence'), HOLD], {
+      recipe: EVIDENCE_RECIPE,
+      evidence: EVIDENCE_FILES,
+    });
+    await h.start();
+    await vi.waitFor(() => expect(h.briefs()).toHaveLength(4), { timeout: 20_000 });
+    expect(h.daemon.store.getTask(h.task.id)?.budget_used).toBe(2);
+    const missing = h.daemon.store.stageEventsOfTask(h.task.id).find((row) => row.event_type === 'evidence_missing');
+    expect(JSON.parse(missing!.payload)).toMatchObject({ reason: 'no Evidence for AC2' });
+    expect(rows(h)).toEqual([]);
+    expect(existsSync(join(h.daemon.paths.data, 'evidence', 'training', String(h.task.task_no)))).toBe(false);
+    expect(h.briefs()[3]).toContain("The Evidence Producer's output was refused: no Evidence for AC2");
+  });
+
+  it('rejected, then repeat: a false verdict sends the Task back with a unit and the note; the second ingest supersedes the first', async () => {
+    const h = await harness(
+      [done('added the timer'), verdict('pass'), produce(), verify({ shows: [true, false], note: 'the label is cut off' }), done('fixed the label'), verdict('pass'), produce(), verify({ skip: 1 }), HOLD],
+      { recipe: EVIDENCE_RECIPE, evidence: EVIDENCE_FILES },
+    );
+    await h.start();
+    await vi.waitFor(() => expect(appliedTypes(h).filter((type) => type === 'evidence_rejected')).toHaveLength(2), { timeout: 30_000 });
+    const all = rows(h);
+    expect(all).toHaveLength(4);
+    expect(all.filter((row) => row.superseded)).toHaveLength(2);
+    expect(all.slice(0, 2).every((row) => row.superseded)).toBe(true);
+    // Two rejections and the first lap: three units.
+    expect(h.daemon.store.getTask(h.task.id)).toMatchObject({ budget_used: 3, review_round: 0 });
+    const second = h.briefs()[4]!;
+    expect(second).toContain('The Validator rejected the Evidence:');
+    const rejectedId = all.slice(0, 2).find((row) => row.criterion_id === 'AC2')!.id;
+    expect(second).toContain(`- ${rejectedId} (AC2): the label is cut off`);
+    // The second verifier left one row without a verdict: rejected, and the next brief names it.
+    await vi.waitFor(() => expect(h.briefs()).toHaveLength(9), { timeout: 20_000 });
+    const third = h.briefs()[8]!;
+    expect(third).toContain('the Validator gave no verdict for it');
+  });
+
+  it('round 2 prior: after a Review, ANTIPOD_PRIOR holds the round-1 files and index.json', async () => {
+    const h = await harness([done('added the timer'), verdict('pass'), produce(), verify(), HOLD], { recipe: EVIDENCE_RECIPE, evidence: EVIDENCE_FILES });
+    const prior = join(h.daemon.paths.data, 'prior', 'training', String(h.task.task_no));
+    await h.start();
+    await vi.waitFor(() => expect(h.stateOf()).toBe('in_review'), { timeout: 20_000 });
+    // Round 1: empty.
+    expect(readdirSync(prior)).toEqual([]);
+    await h.daemon.coordinator.applyEvent(h.task.id, { type: 'correction' });
+    await vi.waitFor(() => expect(h.briefs()).toHaveLength(5), { timeout: 20_000 });
+    const round1 = rows(h, 1);
+    expect(readdirSync(prior).sort()).toEqual([...round1.map((row) => `${row.id}.${row.kind === 'screencast' ? 'mp4' : 'png'}`), 'index.json'].sort());
+    expect(JSON.parse(readFileSync(join(prior, 'index.json'), 'utf8'))).toEqual(round1.map((row) => ({ evidence_id: row.id, criterion_id: row.criterion_id, kind: row.kind })));
+    expect(readFileSync(join(prior, `${round1.find((row) => row.criterion_id === 'AC1')!.id}.mp4`))).toEqual(AC1_VIDEO);
+    expect(h.briefs()[4]).toContain('AC1 [screencast]');
   });
 });

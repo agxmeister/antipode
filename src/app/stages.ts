@@ -17,7 +17,10 @@ import { silentLog, type Log } from '../core/ports/log.ts';
 import type { Repo } from '../core/ports/repo.ts';
 import type { Store } from '../core/ports/store.ts';
 import type { Clock } from '../core/ports/clock.ts';
+import type { EvidenceStore } from '../core/ports/evidence-store.ts';
+import { currentRows, evidenceTaskDir, type EvidenceRow } from '../core/domain/evidence.ts';
 import { systemClock } from './clock.ts';
+import { buildPrior, priorDir, priorRows } from './evidence.ts';
 import { validateRecipeText } from './recipe-file.ts';
 import { readInstanceSecrets } from './secrets.ts';
 
@@ -69,6 +72,11 @@ export interface StagesOptions {
   runBin: string;
   /** Read at every launch so SIGHUP applies. */
   config: () => { roles: Readonly<Record<string, Partial<RoleLimits>>>; agent: { auth: AgentAuth }; intake?: { context_messages: number } };
+  /**
+   * Evidence rows and files (AD-8): `ANTIPOD_PRIOR` is rebuilt from them before each launch, and the
+   * Evidence-mode brief and verdict rule read the round's rows. Without it, a Task has no Evidence.
+   */
+  evidence?: EvidenceStore;
   /** Stamps Parking Lot rows; the system clock by default. */
   clock?: Clock;
   /** Where `PATH`, `HOME`, `LANG` and `TMPDIR` come from; `process.env` by default. */
@@ -92,18 +100,29 @@ function errorText(error: unknown): string {
 
 /**
  * The fixed discriminator → event map (AD-4, Owner decisions 2026-11-15 and 2026-11-20). Undefined for
- * output that goes through an output hook: `EvidenceOutput`, `OwnerInstruction`.
+ * output that goes through an output hook: `EvidenceOutput`, `OwnerInstruction`. In Evidence mode,
+ * `evidenceIds` are the current round's rows: each needs a `shows_criterion: true` verdict.
  */
-export function eventForOutput(schema: OutputSchemaName, state: TaskState, output: unknown, stageId: string, usage: StageUsage | null): Event | undefined {
+export function eventForOutput(
+  schema: OutputSchemaName,
+  state: TaskState,
+  output: unknown,
+  stageId: string,
+  usage: StageUsage | null,
+  evidenceIds: readonly string[] = [],
+): Event | undefined {
   switch (schema) {
     case 'implementer':
       return { type: (output as ImplementerOutput).status === 'done' ? 'implementer_done' : 'implementer_blocked', stage_id: stageId, usage };
     case 'validator': {
       const value = output as ValidatorOutput;
       if (state === 'verifying') {
-        // Evidence mode: verified only when the verdict passes and at least one verdict was given and every artifact shows its criterion.
+        // Evidence mode: verified only when the verdict passes, every verdict shows its criterion and every
+        // row of the round has such a verdict; with no rows, at least one verdict. Anything less rejects.
         const verdicts = value.evidence_verdicts ?? [];
-        const shown = value.verdict === 'pass' && verdicts.length > 0 && verdicts.every((verdict) => verdict.shows_criterion);
+        const allShown = verdicts.every((verdict) => verdict.shows_criterion);
+        const covered = evidenceIds.length === 0 ? verdicts.length > 0 : evidenceIds.every((id) => verdicts.some((verdict) => verdict.evidence_id === id));
+        const shown = value.verdict === 'pass' && allShown && covered;
         return { type: shown ? 'evidence_verified' : 'evidence_rejected', stage_id: stageId, usage };
       }
       const type = value.verdict === 'pass' ? 'pass' : value.verdict === 'blocking' ? 'blocking_findings' : 'nonblocking_findings';
@@ -251,7 +270,8 @@ export class Stages {
   async #deliver(stage: Stage, schema: OutputSchemaName, output: unknown, usage: StageUsage | null, fields: Record<string, unknown>): Promise<void> {
     const task = this.#options.store.getTask(stage.task_id);
     if (task === undefined) return;
-    let event = eventForOutput(schema, task.state, output, stage.id, usage);
+    const evidenceIds = task.state === 'verifying' ? this.#roundRows(task).map((row) => row.id) : [];
+    let event = eventForOutput(schema, task.state, output, stage.id, usage, evidenceIds);
     let rows: EventRows | undefined;
     if (event === undefined) {
       const hook = this.#hooks.get(stage.role);
@@ -282,10 +302,16 @@ export class Stages {
       hookRows?.(t);
       // `park` parks the lap's non-blocking findings unless a spent budget or a blocked Implementer turned it into `stuck` (AD-3).
       if (parked && store.getTask(t.id)?.state === 'evidencing') {
-        const findings = lastLapOf(store.stagesOfTask(t.id), stage.id)?.nonblocking ?? [];
+        const findings = lastLapOf(store.stagesOfTask(t.id), stage.id, store.stageEventsOfTask(t.id))?.nonblocking ?? [];
         if (findings.length > 0) store.insertParkedFindings(t.id, stage.id, findings, (this.#options.clock ?? systemClock).now().toISOString());
       }
     });
+  }
+
+  /** The current rows of the round being produced (`review_round + 1`, AD-16). */
+  #roundRows(task: Task): EvidenceRow[] {
+    const evidence = this.#options.evidence;
+    return evidence === undefined ? [] : currentRows(evidence.evidenceOf(task.id, task.review_round + 1));
   }
 
   async #fail(taskId: string, stageId: string, reason: string, error: unknown): Promise<void> {
@@ -313,13 +339,16 @@ export class Stages {
     if (!existsSync(cwd)) {
       throw new Error(`the working directory ${cwd} does not exist`);
     }
-    const prior = join(options.dataDir, 'prior', project.name, String(task.task_no ?? '_draft'));
+    const prior = priorDir(options.dataDir, project.name, task.task_no);
+    // Rebuilt before every launch of a numbered Task: the previous Review round's Evidence (AD-7).
+    if (task.task_no !== null && options.evidence !== undefined) await buildPrior(options.evidence, prior, task);
     // Real paths, as claude sees them: rules on a symlinked home (macOS /var → /private/var) would never match.
     const realCwd = realPath(cwd);
     const vars: RoleVars = {
       ANTIPOD_HOME: realPath(options.home),
       WORKTREE: realCwd,
       ANTIPOD_PRIOR: realPath(prior),
+      EVIDENCE_DIR: realPath(join(options.dataDir, task.task_no === null ? join('evidence', project.name, '_draft') : evidenceTaskDir(project.name, task.task_no))),
       OTHER_WORKTREES: this.#otherWorktrees(realCwd),
     };
     const files = await options.resolver.materialize(resolved, join(options.dataDir, 'stages', stage.id, 'role'), vars);
@@ -329,7 +358,7 @@ export class Stages {
       spec: {
         stageId: stage.id,
         cwd,
-        prompt: renderBrief(task, stage, limits, stage.role === INTAKE_ROLE ? await this.#intakeBrief(project, task) : this.#loopBrief(task, stage)),
+        prompt: renderBrief(task, stage, limits, stage.role === INTAKE_ROLE ? await this.#intakeBrief(project, task) : this.#loopBrief(task, stage, project)),
         transcriptPath: this.transcriptPath(stage.id),
         outputSchema: OUTPUT_SCHEMAS[schema],
         settingsPath: files.settingsPath,
@@ -373,13 +402,29 @@ export class Stages {
   }
 
   /** What a loop Role's brief is rendered from, all rows (AD-4, AD-21). */
-  #loopBrief(task: Task, stage: Stage): LoopBrief {
-    const { store } = this.#options;
+  #loopBrief(task: Task, stage: Stage, project: Project): LoopBrief {
+    const { store, evidence, dataDir } = this.#options;
     const stages = store.stagesOfTask(task.id);
+    const events = store.stageEventsOfTask(task.id);
     const title = task.title ?? null;
-    const lastLap = lastLapOf(stages, stage.id);
-    const cause = stage.role === 'triage' ? triageCause(store.stageEventsOfTask(task.id)) : undefined;
+    const lastLap = lastLapOf(stages, stage.id, events);
+    const cause = stage.role === 'triage' ? triageCause(events) : undefined;
+    const round = this.#roundRows(task);
+    const line = (row: EvidenceRow): EvidenceLine => ({
+      id: row.id,
+      criterion_id: row.criterion_id,
+      kind: row.kind,
+      caption: row.caption,
+      degraded: row.degraded,
+      file: realPath(join(dataDir, row.path)),
+    });
+    const rejected = lastLap?.evidenceRejected;
     return {
+      verifying: task.state === 'verifying',
+      evidence: task.state === 'verifying' ? round.map(line) : [],
+      prior: evidence === undefined ? [] : priorRows(evidence, task).map((row) => ({ evidence_id: row.id, criterion_id: row.criterion_id, kind: row.kind })),
+      ...(task.task_no === null ? {} : { priorDir: realPath(priorDir(dataDir, project.name, task.task_no)) }),
+      ...(rejected === undefined ? {} : { rejected: rejectedEvidence(rejected, round) }),
       role: stage.role,
       title,
       goal: store.latestContract(task.id)?.goal ?? null,
@@ -545,6 +590,60 @@ export interface LoopBrief {
   budgetSpent: boolean;
   /** A Triage deciding on a blocked Implementer: its `park` stops the Task like `stuck` (AD-3). */
   blocked: boolean;
+  /** A Validator in Evidence mode (state `verifying`). */
+  verifying?: boolean;
+  /** The round's current Evidence rows, for the Validator in Evidence mode. */
+  evidence?: readonly EvidenceLine[];
+  /** `prior/index.json`: the previous Review round's Evidence (AD-7); empty in round 1. */
+  prior?: readonly PriorEntry[];
+  /** The real path of `ANTIPOD_PRIOR`. */
+  priorDir?: string;
+  /** Each Evidence artifact the last Evidence-mode Validator did not accept, with its note. */
+  rejected?: readonly RejectedEvidence[];
+}
+
+/** One current Evidence row as the Evidence-mode brief lists it. */
+export interface EvidenceLine {
+  id: string;
+  /** `AC<n>`. */
+  criterion_id: string;
+  kind: string;
+  caption: string;
+  degraded: string | null;
+  /** Absolute real path of the file. */
+  file: string;
+}
+
+export interface PriorEntry {
+  evidence_id: string;
+  criterion_id: string;
+  kind: string;
+}
+
+export interface RejectedEvidence {
+  evidence_id: string;
+  /** `AC<n>` when the row is known. */
+  criterion_id: string | null;
+  note: string;
+}
+
+/** The note of an artifact the Validator gave no verdict for. */
+export const NO_VERDICT_NOTE = 'the Validator gave no verdict for it';
+
+/**
+ * What the Implementer reads of a rejection (AD-8): every verdict that did not show its criterion, and
+ * every current row of the round that got no verdict.
+ */
+export function rejectedEvidence(output: ValidatorOutput, rows: readonly EvidenceRow[]): RejectedEvidence[] {
+  const criterion = new Map(rows.map((row) => [row.id, row.criterion_id]));
+  const verdicts = output.evidence_verdicts ?? [];
+  const lines: RejectedEvidence[] = verdicts
+    .filter((verdict) => !verdict.shows_criterion)
+    .map((verdict) => ({ evidence_id: verdict.evidence_id, criterion_id: criterion.get(verdict.evidence_id) ?? null, note: verdict.note }));
+  for (const row of rows) {
+    if (!verdicts.some((verdict) => verdict.evidence_id === row.id)) lines.push({ evidence_id: row.id, criterion_id: row.criterion_id, note: NO_VERDICT_NOTE });
+  }
+  return lines;
 }
 
 function criteriaLines(criteria: readonly CriterionRow[]): string[] {
@@ -575,7 +674,32 @@ function failureLines(lap: LastLap): string[] {
   return lines;
 }
 
-/** The loop part of the brief for the Implementer, Validator and Triage Roles (AD-4, AD-21, CAP-19). */
+/** What the Evidence Producer and Validator lap left for the Implementer (AD-8): a failed ingest or rejected Evidence. */
+function evidenceLines(lap: LastLap, rejected: readonly RejectedEvidence[] | undefined): string[] {
+  const lines: string[] = [];
+  if (lap.evidenceMissing !== undefined) lines.push(`The Evidence Producer's output was refused: ${lap.evidenceMissing}`, '');
+  const output = lap.evidenceRejected;
+  if (output !== undefined) {
+    const items = rejected ?? rejectedEvidence(output, []);
+    lines.push('The Validator rejected the Evidence:');
+    if (output.verdict !== 'pass') lines.push(`- verdict: ${output.verdict}`);
+    lines.push(...items.map((item) => `- ${item.evidence_id}${item.criterion_id === null ? '' : ` (${item.criterion_id})`}: ${item.note}`));
+    lines.push(...findingLines(output.findings), '');
+  }
+  return lines;
+}
+
+function priorLines(brief: LoopBrief): string[] {
+  const prior = brief.prior ?? [];
+  if (prior.length === 0) return ['`ANTIPOD_PRIOR` is empty: this is the first Review round.', ''];
+  return [
+    `\`ANTIPOD_PRIOR\`${brief.priorDir === undefined ? '' : ` (${brief.priorDir})`} holds the previous Review's Evidence as \`<evidence_id>.<ext>\`, listed in \`prior/index.json\`:`,
+    ...prior.map((entry) => `- ${entry.evidence_id} · ${entry.criterion_id} · ${entry.kind}`),
+    '',
+  ];
+}
+
+/** The loop part of the brief for the Implementer, Validator, Evidence Producer and Triage Roles (AD-4, AD-21, CAP-19). */
 export function renderLoopBrief(brief: LoopBrief): string {
   const lines: string[] = ['## Task', ''];
   if (brief.title !== null) lines.push(`Title: ${brief.title}`);
@@ -586,11 +710,13 @@ export function renderLoopBrief(brief: LoopBrief): string {
   switch (brief.role) {
     case 'implementer': {
       const blocked = lap?.implementer.status === 'blocked';
-      if (lap !== undefined && (blocked || lap.blocking.length > 0 || lap.testFailure !== undefined || lap.triageReason !== undefined)) {
+      const evidence = lap === undefined ? [] : evidenceLines(lap, brief.rejected);
+      if (lap !== undefined && (blocked || lap.blocking.length > 0 || lap.testFailure !== undefined || lap.triageReason !== undefined || evidence.length > 0)) {
         lines.push('### What the last lap left', '');
         if (blocked) lines.push(`The previous Implementer reported itself blocked: ${lap.implementer.summary}`, '');
         lines.push(...failureLines(lap));
         if (lap.triageReason !== undefined) lines.push(`Triage's reason: ${lap.triageReason}`, '');
+        lines.push(...evidence);
       }
       if (brief.parked.length > 0) {
         lines.push('### Parked findings', '', 'These wait in the Parking Lot for the Owner; do not work on them.', ...brief.parked.map((p) => `- P${p.p_no} ${p.criterion_id}: ${p.note}`), '');
@@ -598,12 +724,40 @@ export function renderLoopBrief(brief: LoopBrief): string {
       break;
     }
     case 'validator':
+      if (brief.verifying === true) {
+        const evidence = brief.evidence ?? [];
+        lines.push(
+          '### Evidence to judge',
+          '',
+          'This is Evidence mode. Open each file below and judge whether it shows its criterion; captions are claims, not proof.',
+          'Return one `evidence_verdicts` entry per artifact, with its id. Verdict `pass` only when every artifact shows its criterion.',
+          '',
+        );
+        if (evidence.length === 0) lines.push('(no Evidence)');
+        for (const row of evidence) {
+          const degraded = row.degraded === null ? '' : ` · degraded: ${row.degraded}`;
+          lines.push(`- ${row.id} · ${row.criterion_id} · ${row.kind} · ${row.caption}${degraded} · ${row.file}`);
+        }
+        lines.push('');
+        break;
+      }
       lines.push(
         '### What to judge',
         '',
         'Judge the Branch as it is in this worktree against every criterion above. Read the code and run Recipe steps;',
         'nothing anyone has said about the work counts as a verdict.',
         '',
+      );
+      break;
+    case 'evidence-producer':
+      lines.push(
+        '### What to produce',
+        '',
+        'At least one artifact for every criterion above, of the kind it requires. Each `name` is relative to the `ANTIPOD_OUT`',
+        'of a step you ran (`antipod step evidence`); `antipod-evidence ... --out <ANTIPOD_OUT>/<file>` writes there too.',
+        'Files are at most 50 MB; videos are .mp4 (or .mov, .m4v) of at most 60 s.',
+        '',
+        ...priorLines(brief),
       );
       break;
     case 'triage': {

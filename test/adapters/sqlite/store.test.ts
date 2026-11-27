@@ -56,7 +56,7 @@ function effect(taskId: string | null, kind: 'integrate' | 'run_release' = 'inte
 }
 
 describe('SqliteStore', () => {
-  it('migrations 0002 to 0009 create the STRICT Coordinator, Telegram, step, contract and Parking Lot tables', () => {
+  it('migrations 0002 to 0010 create the STRICT Coordinator, Telegram, step, contract, Parking Lot and Evidence tables', () => {
     const ts = setup();
     const tables = ts.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>;
     expect(tables.map((t) => t.name)).toEqual([
@@ -67,6 +67,7 @@ describe('SqliteStore', () => {
       'criteria',
       'draft_questions',
       'effects',
+      'evidence',
       'intake_messages',
       'outbox',
       'parking_lot',
@@ -79,7 +80,7 @@ describe('SqliteStore', () => {
       'tasks',
       'telegram_messages',
     ]);
-    for (const table of ['tasks', 'task_dependencies', 'outbox', 'callbacks', 'telegram_messages', 'step_runs', 'capability_leases', 'contracts', 'criteria', 'draft_questions', 'contract_sources', 'intake_messages', 'parking_lot']) {
+    for (const table of ['tasks', 'task_dependencies', 'outbox', 'callbacks', 'telegram_messages', 'step_runs', 'capability_leases', 'contracts', 'criteria', 'draft_questions', 'contract_sources', 'intake_messages', 'parking_lot', 'evidence']) {
       const sql = ts.db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(table) as { sql: string };
       expect(sql.sql).toContain('STRICT');
     }

@@ -17,6 +17,10 @@ export interface FakeRun {
   ignoreSigint?: boolean;
   usage?: Record<string, unknown>;
   splitResult?: boolean;
+  /** Recipe steps to run through `antipod step` before the result. */
+  steps?: string[];
+  /** Answer as the Validator in Evidence mode, one verdict per Evidence line of the brief. */
+  verifyEvidence?: { verdict?: 'pass' | 'blocking' | 'nonblocking'; shows?: boolean[]; note?: string; skip?: number };
 }
 
 /** What the fake recorded about one launch. */

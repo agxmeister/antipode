@@ -30,7 +30,7 @@ function setup() {
   return { root, packageDir, homeDir, resolver: new RoleConfigResolver({ packageDir, homeDir }) };
 }
 
-const VARS: RoleVars = { ANTIPOD_HOME: '/h', WORKTREE: '/h/data/worktrees/p/3', ANTIPOD_PRIOR: '/h/data/prior/p/3', OTHER_WORKTREES: ['/h/data/worktrees/p/1', '/h/data/worktrees/p/_main'] };
+const VARS: RoleVars = { ANTIPOD_HOME: '/h', WORKTREE: '/h/data/worktrees/p/3', ANTIPOD_PRIOR: '/h/data/prior/p/3', EVIDENCE_DIR: '/h/data/evidence/p/3', OTHER_WORKTREES: ['/h/data/worktrees/p/1', '/h/data/worktrees/p/_main'] };
 
 describe('RoleConfigResolver (AD-15, AD-22)', () => {
   it('layering: home overrides prompt.md, the repo overrides permissions.json at config_sha; the rest comes from the package', async () => {

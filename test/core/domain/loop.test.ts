@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StageEventRow } from '../../../src/core/domain/events.ts';
-import { lapsOf, lastLapOf, stuckCause, stuckExit, triageCause } from '../../../src/core/domain/loop.ts';
+import { EVIDENCE_MISSING_REASON, lapsOf, lastLapOf, stuckCause, stuckExit, triageCause } from '../../../src/core/domain/loop.ts';
 import type { Stage } from '../../../src/core/domain/stage.ts';
 
 const AT = '2026-11-20T12:00:00.000Z';
@@ -14,6 +14,23 @@ function event(event_type: string, from_state: string | null, to_state: string |
 }
 
 describe('loop rows (AD-21)', () => {
+  it('the last lap carries the evidence_missing reason and the Evidence-mode output that rejected the Evidence', () => {
+    const applied = (stageId: string, event_type: string, payload: Record<string, unknown> = {}): StageEventRow =>
+      ({ id: `e-${stageId}`, task_id: 't', stage_id: stageId, event_type, payload: JSON.stringify({ type: event_type, ...payload }), status: 'applied', ignore_reason: null, from_state: 'evidencing', to_state: 'verifying', created_at: AT }) as StageEventRow;
+    const producer = stage('evidence-producer', { artifacts: [] });
+    const missingLap = [stage('implementer', { status: 'done', summary: 'one' }), stage('validator', { verdict: 'pass', findings: [] }), producer];
+    expect(lastLapOf(missingLap, undefined, [applied(producer.id, 'evidence_missing', { reason: 'no Evidence for AC2' })])?.evidenceMissing).toBe('no Evidence for AC2');
+    expect(lastLapOf(missingLap, undefined, [applied(producer.id, 'evidence_missing')])?.evidenceMissing).toBe(EVIDENCE_MISSING_REASON);
+    expect(lastLapOf(missingLap, undefined, [applied(producer.id, 'evidence_produced')])?.evidenceMissing).toBeUndefined();
+
+    const rejecting = { verdict: 'nonblocking', findings: [{ criterion_id: 'AC1', blocking: false, note: 'blurry' }], evidence_verdicts: [{ evidence_id: 'E1', shows_criterion: false, note: 'cut off' }] };
+    const verifier = stage('validator', rejecting);
+    const lap = lastLapOf([...missingLap, verifier], undefined, [applied(producer.id, 'evidence_produced'), applied(verifier.id, 'evidence_rejected')]);
+    expect(lap?.evidenceRejected).toEqual(rejecting);
+    // The Evidence-mode findings are not the lap's Branch findings.
+    expect(lap?.nonblocking).toEqual([]);
+  });
+
   it('numbers Implementer laps from the Stages that returned output', () => {
     const stages = [stage('implementer'), stage('implementer', { status: 'done', summary: 'one' }), stage('validator', { verdict: 'pass', findings: [] }), stage('implementer', { status: 'blocked', summary: 'two' })];
     expect(lapsOf(stages)).toEqual([

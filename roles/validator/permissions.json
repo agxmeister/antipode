@@ -4,6 +4,7 @@
       "Bash(antipod step:*)",
       "Read(/{{WORKTREE}}/**)",
       "Read(/{{ANTIPOD_PRIOR}}/**)",
+      "Read(/{{EVIDENCE_DIR}}/**)",
       "Read(/{{ANTIPOD_HOME}}/data/steps/**)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
