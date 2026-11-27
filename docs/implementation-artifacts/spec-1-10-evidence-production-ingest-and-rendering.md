@@ -2,7 +2,7 @@
 title: 'Evidence production, ingest and rendering'
 type: 'feature'
 created: '2026-11-27'
-status: 'in-progress'
+status: 'done'
 baseline_commit: 'a472936beb2c9280e2acc9daa561ff54ca50c0ef'
 route: 'dispatch'
 review_loop_iteration: 0
@@ -104,6 +104,31 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Evidence | Route |
+|---|--------|---------|---------|----------|-------|
+| 1 | verification-gap, blind | Round-2 prior wiring (`#loopBrief` prior lines, hook `priorIds`) untested; the round-2 test asserts criteria text in the Implementer brief | medium | Pre-verified gap; `'AC1 [screencast]'` comes from `criteriaLines` and brief 4 is the Implementer's | patch |
+| 2 | verification-gap, blind | `fileInside` symlink refusal and newest-run-first resolution untested | medium | Pre-verified gap; no symlink test under `test/app`, the `break` is unpinned | patch |
+| 3 | verification-gap | `antipod-evidence` shim only mode-checked, never run | medium | Pre-verified gap; a wrong render path would still pass | patch |
+| 4 | verification-gap, blind | `labelAt` shrink-to-fit branch never exercised | low | Pre-verified gap; every test uses wide images with short text | patch |
+| 5 | edge-case | `mvhd` duration 0 (fragmented MP4) reads as 0 s and passes the 60 s limit | medium | `mp4.ts` returns `duration / timescale` with no zero guard; fragmented files leave `mvhd` duration 0 | patch |
+| 6 | blind | `PNG_1PX` in `test/helpers/evidence.ts` unused | low | No importer in `test/` | patch |
+| 7 | blind, edge-case, verification-gap | A thrown `put`/`probe` in the hook becomes `stage_failed(unhandled_output)` | low | Real (`stages.ts:287-293`), but an I/O failure is not a contract check; Stage failure is the right path and the boot sweep clears the copies | reject |
+| 8 | blind | Copies from an `ignored` `evidence_produced` stay until the next boot | low | Real but rare (pause/cancel mid-copy); the boot sweep removes them; a fix adds a post-apply branch | reject |
+| 9 | blind | Newly created parent directories of the Evidence file are not fsynced | low | Real; window is a crash right after `mkdir`; fix adds a loop over created dirs | reject |
+| 10 | blind | Boot sweep unguarded; empty `r<k>/` dirs remain | low | Files are the daemon's own, mode 0700; EACCES/EBUSY not reachable in normal use | reject |
+| 11 | blind | Renderer reads fonts from `src/`, absent in a `dist`-only build | false | `package.json` has no `files` field, so `src/` ships with the package | reject |
+| 12 | blind, edge-case | Ingest does not check `kind` against `required_evidence` | false | `required_evidence` is free text (`contract.ts:140`), not a kind; the Evidence-mode Validator judges fit | reject |
+| 13 | blind, edge-case | Zero active criteria / no rows lets Evidence mode pass or loop | false | A contract needs at least one criterion (`contract.ts:144`); the daemon always passes `evidence` | reject |
+| 14 | blind, edge-case | Videos with other extensions (.gif, .3gp) skip duration/playability checks | low | The spec enumerates the lists; unlikely Producer output | reject |
+| 15 | blind | Composite orientation from the after image only; no output-size cap | low | Mixed-orientation pairs are unusual; the 50 MB ingest check still applies | reject |
+| 16 | blind | Same name listed twice, EXIF rotation, optional `reason` untested | low | Harmless or schema-only behaviour | reject |
+| 17 | blind | `Daemon` exposes concrete `SqliteEvidenceStore` | false | Consistent with `store: SqliteStore` (`daemon.ts:53`); no caller harmed | reject |
+| 18 | edge-case | File changes between probe and copy | low | Steps finish before the Producer returns its output | reject |
+| 19 | edge-case | Symlinked name whose target has another extension | low | Needs a symlink inside `ANTIPOD_OUT` with a mismatched name | reject |
+| 20 | edge-case | Hook returns undefined on schema mismatch / null `task_no` / missing project | false | Structured output is schema-validated before delivery; Evidence runs only for numbered Tasks of a registered Project | reject |
+| 21 | edge-case | `--out` with a non-.png extension writes PNG bytes | low | Unlikely; fix adds a guard | reject |
+| 22 | edge-case | A missing prior file makes every launch fail | low | Evidence files are never deleted by the system | reject |
 
 ## Design Notes
 

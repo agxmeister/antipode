@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-07-2026 18:46
-last_updated: 27-11-2026 00:00
+last_updated: 28-11-2026 00:00
 project: antipod
 project_key: NOKEY
 tracking_system: file-system
@@ -45,7 +45,7 @@ development_status:
   1-7-claude-cli-agentrunner-and-role-configs: done
   1-8-intake-drafts-from-text-and-the-inbox: done
   1-9-implement-validate-and-triage-loop: done
-  1-10-evidence-production-ingest-and-rendering: in-progress
+  1-10-evidence-production-ingest-and-rendering: review
   1-11-review-sequence-accept-and-correction: backlog
   1-12-integration-and-release: backlog
   1-13-bootstrap-gate-and-end-to-end-smoke-test: backlog
