@@ -63,7 +63,7 @@ context:
 
 ## Owner decisions (2026-11-27)
 
-- **Rejected Evidence costs one budget unit.** SPEC CAP-13 wins over spine AD-5: `evidence_rejected` joins `COUNTING_CAUSES`. Adding it to AD-5 goes through `bmad-correct-course`, not this story.
+- **Rejected Evidence costs one budget unit.** SPEC CAP-13 wins over spine AD-3: `evidence_rejected` joins `COUNTING_CAUSES`. AD-3 was updated by Sprint Change Proposal 2026-11-27.
 - **Stuck card media.** The "last Evidence resent as media" that 1-9 deferred moves to 1-11, which builds media sending for Evidence messages.
 - **Scope.** One spec. The Owner kept it whole over the 1600-token target.
 
